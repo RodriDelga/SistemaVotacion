@@ -57,6 +57,7 @@ La suite utiliza SQLite temporal, servidores simulados y datos sintéticos. No n
 - `docs/PROTOCOLO.md`: HMAC, canonicalización, claves y rotación.
 - `docs/RASPBERRY_PI.md`: instalación, firmware, ejecución y servicios.
 - `docs/BITACORA.md`: cambios por etapa y alcance verificado.
+- `docs/DASHBOARD_MANUAL.md` y `docs/DASHBOARD_DECISIONES.md`: panel web de administración (`dashboard/`, `dashboard_api.py`) — resultados en tiempo real, estado del sistema y reportes en `/dashboard/`.
 
 ## Alcance funcional importante
 

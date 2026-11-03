@@ -928,3 +928,13 @@ def getAnalytics(db: Session = Depends(getDbSession)):
         "failedFingerprintAttempts": failedAttempts,
         "auditFlags": auditFlags
     }
+
+
+# --- Dashboard web (modulo aditivo; ver docs/DASHBOARD_MANUAL.md) ---
+from dashboard_api import BackendBindings, install_dashboard  # noqa: E402
+
+install_dashboard(app, BackendBindings(
+    engine=engine, verify_device_key=verifyDeviceKey, device_key=DEVICE_KEY,
+    Voter=Voter, Candidate=Candidate, Ballot=Ballot, DeviceReplayGuard=DeviceReplayGuard,
+    fingerprint_device_id=FINGERPRINT_DEVICE_ID, normalize_region=normalizeRegionName,
+))
