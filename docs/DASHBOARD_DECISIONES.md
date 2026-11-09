@@ -75,3 +75,26 @@ La regla original disparaba con ≥ 10 rechazos acumulados. En una jornada real 
 5. **Pruebas previas fallidas, no causadas por el dashboard:** `tests/test_backend.py` (3 pruebas) falla con FastAPI reciente por devolver 422 al enviar JSON sin `Content-Type: application/json` desde el cliente de pruebas; el firmware sí envía la cabecera. `tests/test_real_adapters.py` no importa sin `customtkinter`/`opencv`. Corregir el cliente de pruebas queda fuera de esta tarea.
 6. El repositorio versiona `__pycache__/*.pyc` y `README.md` menciona un `.env.example` que no existe. Se añadió `.gitignore`; no se eliminaron archivos ya versionados.
 7. Sin pruebas con la Raspberry Pi ni con Neon: validado con SQLite temporal y datos sintéticos.
+
+## F. Proyección de participación (`forecast.py`)
+
+Confirmadas por el responsable: **A** modelo logístico con línea base de ritmo reciente; **B** cálculo en el servidor; **C** horario de jornada configurable (`DASHBOARD_POLLS_OPEN`/`CLOSE`, aún por implementar en la Fase 1).
+
+| ID | Decisión | Motivo / evidencia |
+|---|---|---|
+| D-41 | **Ajuste por máxima verosimilitud de un proceso de Poisson no homogéneo** (curva logística normalizada con g(0)=0), con K = votos / g(ahora) en forma cerrada, acotado a [votos, padrón]. | Se probó primero mínimos cuadrados sobre el acumulado: con ~46 votos prefería «la jornada ya terminó» (SSE 31) frente a la verdad (SSE 158) y publicaba 1 % cuando la realidad era 45 %. Los errores del acumulado están correlacionados; la verosimilitud multinomial de los conteos por intervalo es el modelo estadístico correcto. |
+| D-42 | **Intervalo = unión de dos fuentes**: bootstrap de los conteos + llegadas futuras Poisson, y región de verosimilitud perfil (χ²₁/2). Nivel 80 %. | El bootstrap solo expresa ruido de muestreo y no puede mostrar la ambigüedad del inicio del día. Sin las llegadas Poisson futuras, la cobertura a las 8–10 h era 59 % y 45 % (nominal 80 %); con ellas, 74–84 %. |
+| D-43 | **No se publica cifra central si el pico aún no se vio**: fracción completada < 0.6, intervalo > 30 pp, o ajuste que da por terminada la jornada con < 50 % del tiempo (> 0.95). Se devuelve `low_confidence` con el rango. Mínimos: 100 votos y 60 min. | K de una logística solo es identificable tras la inflexión. En la barrida (80 jornadas sintéticas/hora) las cifras publicadas antes de ver el pico fallaban hasta en 45 puntos. Reglas ajustables por parámetro. |
+| D-44 | **Línea base `baseline_recent_rate`**: votos + ritmo de la última hora × horas restantes. | Referencia a superar en la evaluación (Fase 6); en las pruebas oscila 14–100 % antes del pico, es decir, inservible justo cuando más se necesita. |
+
+**Resultados medidos (jornadas sintéticas logísticas, padrón 10 000, 20 semillas × 4 escenarios, intervalo nominal 80 %):**
+
+| Horas transcurridas (de 12) | Jornadas con proyección | Cobertura del intervalo | Ancho mediano | Error absoluto mediano |
+|---|---|---|---|---|
+| 2 h | 0 % | — | — | — |
+| 4 h | 0 % | — | — | — |
+| 6 h | 50 % | 75 % | 1.9 pp | 0.44 pp |
+| 8 h | 100 % | 74 % | 0.6 pp | 0.20 pp |
+| 10 h | 100 % | 84 % | 0.2 pp | 0.05 pp |
+
+Límites: los datos de prueba se generan con el mismo modelo que se ajusta (sin desajuste de modelo); la evaluación con curvas de otra forma (doble pico, caída de una urna) queda para la Fase 6. Coste: 0.4–0.6 s por cálculo en este entorno (bootstrap = 200); en la Raspberry Pi será mayor, por lo que el endpoint deberá cachear el resultado (≈ 30 s).
