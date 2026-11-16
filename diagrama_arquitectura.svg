@@ -1,0 +1,271 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1300 920" width="100%" height="100%" style="background-color: #F8FAFC; font-family: system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;">
+  <defs>
+    <!-- Filtros de sombra -->
+    <filter id="shadow" x="-5%" y="-5%" width="110%" height="110%">
+      <feDropShadow dx="0" dy="4" stdDeviation="6" flood-color="#0B1F3A" flood-opacity="0.08" />
+    </filter>
+    <filter id="glow" x="-10%" y="-10%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="2" stdDeviation="4" flood-color="#1F4E9C" flood-opacity="0.2" />
+    </filter>
+
+    <!-- Marcadores de flecha -->
+    <marker id="arrow-blue" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#1F4E9C" />
+    </marker>
+    <marker id="arrow-orange" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#D97706" />
+    </marker>
+    <marker id="arrow-green" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#059669" />
+    </marker>
+    <marker id="arrow-purple" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#7C3AED" />
+    </marker>
+  </defs>
+
+  <!-- ENCABEZADO -->
+  <rect x="0" y="0" width="1300" height="80" fill="#0B1F3A" />
+  <text x="40" y="38" fill="#FFFFFF" font-size="22" font-weight="700" letter-spacing="0.5">SISTEMA DE VOTACIÓN ELECTRÓNICA — MAPA DE ARQUITECTURA FÍSICA Y RED</text>
+  <text x="40" y="62" fill="#94A3B8" font-size="14">Mapeo integral de conexiones físicas (SPI, UART, GPIO), enlaces Wi-Fi con HMAC y servicios de software</text>
+
+  <!-- ========================================== -->
+  <!-- SECCIÓN IZQUIERDA: DISPOSITIVOS EXTERNOS ESP32 -->
+  <!-- ========================================== -->
+
+  <!-- DISPOSITIVO 1: ESP32 NFC -->
+  <g transform="translate(40, 110)">
+    <rect x="0" y="0" width="320" height="340" rx="16" fill="#FFFFFF" stroke="#CBD5E1" stroke-width="2" filter="url(#shadow)" />
+    <rect x="0" y="0" width="320" height="42" rx="16" fill="#EFF6FF" />
+    <rect x="0" y="24" width="320" height="18" fill="#EFF6FF" />
+    <text x="16" y="27" fill="#1E3A8A" font-size="15" font-weight="700">1. Dispositivo Externo: ESP32 NFC</text>
+
+    <!-- Tarjeta del votante -->
+    <rect x="20" y="55" width="280" height="60" rx="10" fill="#F8FAFC" stroke="#94A3B8" stroke-width="1.5" stroke-dasharray="4" />
+    <text x="32" y="80" fill="#0F172A" font-size="13" font-weight="600">Tarjeta de Votante (RFID / NFC)</text>
+    <text x="32" y="98" fill="#64748B" font-size="11">Norma ISO/IEC 14443A (MIFARE) · UID 4 a 10 bytes</text>
+
+    <!-- Flecha RF -->
+    <path d="M 160 115 L 160 135" stroke="#D97706" stroke-width="2" stroke-dasharray="3,3" marker-end="url(#arrow-orange)" />
+    <text x="168" y="130" fill="#D97706" font-size="10" font-weight="600">Radiofrecuencia 13.56 MHz</text>
+
+    <!-- Módulo PN532 -->
+    <rect x="20" y="140" width="280" height="65" rx="10" fill="#FEF3C7" stroke="#F59E0B" stroke-width="1.5" />
+    <text x="32" y="165" fill="#92400E" font-size="13" font-weight="700">Módulo Lector Adafruit PN532</text>
+    <text x="32" y="182" fill="#78350F" font-size="11">Lectura pasiva de UID por antena integrada</text>
+    <text x="32" y="196" fill="#B45309" font-size="10" font-weight="600">Alimentación: VCC y GND común</text>
+
+    <!-- Bus SPI (Físico) -->
+    <path d="M 160 205 L 160 230" stroke="#1F4E9C" stroke-width="2.5" marker-end="url(#arrow-blue)" />
+    <text x="168" y="222" fill="#1F4E9C" font-size="10" font-weight="700">Bus SPI (Pines 18, 19, 23, 5)</text>
+
+    <!-- Microcontrolador ESP32 -->
+    <rect x="20" y="235" width="280" height="85" rx="10" fill="#F1F5F9" stroke="#334155" stroke-width="1.5" />
+    <text x="32" y="260" fill="#0F172A" font-size="13" font-weight="700">Microcontrolador ESP32 (NFC)</text>
+    <text x="32" y="278" fill="#475569" font-size="11">• Servidor HTTP local (Puerto 80)</text>
+    <text x="32" y="293" fill="#475569" font-size="11">• Endpoint: POST /v1/nfc/scan</text>
+    <text x="32" y="308" fill="#0369A1" font-size="10" font-weight="600">Seguridad: Valida HMAC, nonce y secuencia NTP</text>
+  </g>
+
+  <!-- DISPOSITIVO 2: ESP32 HUELLA -->
+  <g transform="translate(40, 480)">
+    <rect x="0" y="0" width="320" height="340" rx="16" fill="#FFFFFF" stroke="#CBD5E1" stroke-width="2" filter="url(#shadow)" />
+    <rect x="0" y="0" width="320" height="42" rx="16" fill="#F3E8FF" />
+    <rect x="0" y="24" width="320" height="18" fill="#F3E8FF" />
+    <text x="16" y="27" fill="#6B21A8" font-size="15" font-weight="700">2. Dispositivo Externo: ESP32 Huella</text>
+
+    <!-- Dedo del votante -->
+    <rect x="20" y="55" width="280" height="60" rx="10" fill="#F8FAFC" stroke="#94A3B8" stroke-width="1.5" stroke-dasharray="4" />
+    <text x="32" y="80" fill="#0F172A" font-size="13" font-weight="600">Dedo del Votante</text>
+    <text x="32" y="98" fill="#64748B" font-size="11">Contacto físico directo sobre el prisma óptico</text>
+
+    <!-- Flecha contacto -->
+    <path d="M 160 115 L 160 135" stroke="#7C3AED" stroke-width="2" marker-end="url(#arrow-purple)" />
+
+    <!-- Sensor R307 -->
+    <rect x="20" y="140" width="280" height="65" rx="10" fill="#EDE9FE" stroke="#8B5CF6" stroke-width="1.5" />
+    <text x="32" y="165" fill="#5B21B6" font-size="13" font-weight="700">Sensor Óptico de Huella R307/AS608</text>
+    <text x="32" y="182" fill="#4C1D95" font-size="11">Captura imagen, genera plantilla y busca slot</text>
+    <text x="32" y="196" fill="#6D28D9" font-size="10" font-weight="600">Memoria interna: 127 a 1000 huellas</text>
+
+    <!-- UART Serial (Físico) -->
+    <path d="M 160 205 L 160 230" stroke="#1F4E9C" stroke-width="2.5" marker-end="url(#arrow-blue)" />
+    <text x="168" y="222" fill="#1F4E9C" font-size="10" font-weight="700">UART 57600 baud (RX 16 / TX 17)</text>
+
+    <!-- Microcontrolador ESP32 -->
+    <rect x="20" y="235" width="280" height="85" rx="10" fill="#F1F5F9" stroke="#334155" stroke-width="1.5" />
+    <text x="32" y="260" fill="#0F172A" font-size="13" font-weight="700">Microcontrolador ESP32 (Huella)</text>
+    <text x="32" y="278" fill="#475569" font-size="11">• Cliente HTTP en bucle (polling cada 2s)</text>
+    <text x="32" y="293" fill="#475569" font-size="11">• Entrega resultado atómico de un solo uso</text>
+    <text x="32" y="308" fill="#6B21A8" font-size="10" font-weight="600">Seguridad: Cabeceras firmadas con HMAC</text>
+  </g>
+
+  <!-- ========================================== -->
+  <!-- SECCIÓN CENTRAL: RASPBERRY PI 5 (QUIOSCO) -->
+  <!-- ========================================== -->
+  <g transform="translate(460, 110)">
+    <rect x="0" y="0" width="460" height="710" rx="20" fill="#FFFFFF" stroke="#0B1F3A" stroke-width="3" filter="url(#shadow)" />
+    <rect x="0" y="0" width="460" height="50" rx="20" fill="#0B1F3A" />
+    <rect x="0" y="30" width="460" height="20" fill="#0B1F3A" />
+    <text x="24" y="34" fill="#FFFFFF" font-size="17" font-weight="700">Casilla Central: Raspberry Pi 5 (64 bits)</text>
+
+    <!-- 1. Periféricos Físicos de la Pi -->
+    <rect x="20" y="65" width="420" height="120" rx="12" fill="#F8FAFC" stroke="#CBD5E1" stroke-width="1.5" />
+    <text x="32" y="88" fill="#0B1F3A" font-size="13" font-weight="700">PERIFÉRICOS DE HARDWARE CONECTADOS DIRECTO A LA PLACA</text>
+
+    <!-- LEDs -->
+    <rect x="30" y="100" width="115" height="70" rx="8" fill="#ECFDF5" stroke="#10B981" stroke-width="1.2" />
+    <circle cx="45" cy="120" r="6" fill="#10B981" />
+    <text x="58" y="124" fill="#065F46" font-size="11" font-weight="700">LED Tarjeta</text>
+    <text x="36" y="142" fill="#047857" font-size="10">Pin GPIO 17</text>
+    <text x="36" y="156" fill="#047857" font-size="9">Luz testigo NFC</text>
+
+    <rect x="155" y="100" width="115" height="70" rx="8" fill="#ECFDF5" stroke="#10B981" stroke-width="1.2" />
+    <circle cx="170" cy="120" r="6" fill="#10B981" />
+    <text x="183" y="124" fill="#065F46" font-size="11" font-weight="700">LED Huella</text>
+    <text x="161" y="142" fill="#047857" font-size="10">Pin GPIO 27</text>
+    <text x="161" y="156" fill="#047857" font-size="9">Luz testigo Biometría</text>
+
+    <rect x="280" y="100" width="150" height="70" rx="8" fill="#ECFDF5" stroke="#10B981" stroke-width="1.2" />
+    <circle cx="295" cy="120" r="6" fill="#10B981" />
+    <text x="308" y="124" fill="#065F46" font-size="11" font-weight="700">LED Rostro</text>
+    <text x="286" y="142" fill="#047857" font-size="10">Pin GPIO 22</text>
+    <text x="286" y="156" fill="#047857" font-size="9">Luz testigo Facial</text>
+
+    <!-- 2. Capa de Aplicación Gráfica (kiosk_ui) -->
+    <rect x="20" y="200" width="420" height="280" rx="14" fill="#F1F5F9" stroke="#94A3B8" stroke-width="1.5" />
+    <text x="32" y="224" fill="#1E293B" font-size="14" font-weight="700">INTERFAZ Y CONTROLADOR DEL QUIOSCO (kiosk_ui)</text>
+
+    <rect x="32" y="235" width="396" height="50" rx="8" fill="#FFFFFF" stroke="#CBD5E1" stroke-width="1" />
+    <text x="44" y="255" fill="#0F172A" font-size="12" font-weight="700">Pantalla Táctil CustomTkinter (app_window.py)</text>
+    <text x="44" y="272" fill="#64748B" font-size="10">Bienvenida → Verificación → Selección Candidatos → Revisión → Modal Confirmar</text>
+
+    <rect x="32" y="295" width="396" height="55" rx="8" fill="#FFFFFF" stroke="#CBD5E1" stroke-width="1" />
+    <text x="44" y="315" fill="#0F172A" font-size="12" font-weight="700">Controlador Central de Sesión (VotingController)</text>
+    <text x="44" y="332" fill="#64748B" font-size="10">Hilos en segundo plano · Cola de mensajes segura · Bloqueo de doble voto</text>
+
+    <!-- Adaptadores y Motor Facial -->
+    <rect x="32" y="360" width="125" height="105" rx="8" fill="#EFF6FF" stroke="#3B82F6" stroke-width="1" />
+    <text x="38" y="380" fill="#1E40AF" font-size="11" font-weight="700">Adaptador NFC</text>
+    <text x="38" y="398" fill="#1E3A8A" font-size="9">• Cliente HTTP Wi-Fi</text>
+    <text x="38" y="412" fill="#1E3A8A" font-size="9">• Firma orden HMAC</text>
+    <text x="38" y="426" fill="#1E3A8A" font-size="9">• Verifica respuesta</text>
+    <text x="38" y="445" fill="#059669" font-size="9" font-weight="700">Enciende LED 17</text>
+
+    <rect x="167" y="360" width="125" height="105" rx="8" fill="#FAF5FF" stroke="#A855F7" stroke-width="1" />
+    <text x="173" y="380" fill="#6B21A8" font-size="11" font-weight="700">Adaptador Huella</text>
+    <text x="173" y="398" fill="#581C87" font-size="9">• Pide orden en API</text>
+    <text x="173" y="412" fill="#581C87" font-size="9">• Monitorea estado</text>
+    <text x="173" y="426" fill="#581C87" font-size="9">• Límite: 5 intentos</text>
+    <text x="173" y="445" fill="#059669" font-size="9" font-weight="700">Enciende LED 27</text>
+
+    <rect x="302" y="360" width="125" height="105" rx="8" fill="#FEF2F2" stroke="#EF4444" stroke-width="1" />
+    <text x="308" y="380" fill="#991B1B" font-size="11" font-weight="700">Motor Facial Local</text>
+    <text x="308" y="398" fill="#7F1D1D" font-size="9">• OpenCV + dlib HOG</text>
+    <text x="308" y="412" fill="#7F1D1D" font-size="9">• Descifra AES-GCM</text>
+    <text x="308" y="426" fill="#7F1D1D" font-size="9">• Distancia Euclídea</text>
+    <text x="308" y="445" fill="#059669" font-size="9" font-weight="700">Enciende LED 22</text>
+
+    <!-- Conexión de software interna hacia FastAPI -->
+    <path d="M 230 480 L 230 500" stroke="#1F4E9C" stroke-width="2" marker-end="url(#arrow-blue)" />
+    <text x="238" y="495" fill="#1F4E9C" font-size="9" font-weight="700">HTTP Local 127.0.0.1:8000</text>
+
+    <!-- 3. Servidor Local FastAPI -->
+    <rect x="20" y="505" width="420" height="185" rx="14" fill="#FFFFFF" stroke="#1F4E9C" stroke-width="2" />
+    <text x="32" y="530" fill="#0B1F3A" font-size="14" font-weight="700">SERVIDOR DE REGLAS DE NEGOCIO Y API (FastAPI)</text>
+    <text x="32" y="546" fill="#64748B" font-size="10">Uvicorn expuesto en puerto 8000 (Local e IP LAN de la casilla)</text>
+
+    <rect x="32" y="555" width="396" height="120" rx="8" fill="#F8FAFC" stroke="#E2E8F0" stroke-width="1" />
+    <text x="44" y="575" fill="#0F172A" font-size="11" font-weight="700">Endpoints Principales:</text>
+    <text x="44" y="593" fill="#334155" font-size="10">• <tspan font-weight="700">POST /api/v1/session/start</tspan> : Inicia sesión validando UID y voto previo</text>
+    <text x="44" y="609" fill="#334155" font-size="10">• <tspan font-weight="700">GET/POST .../fingerprint</tspan> : Órdenes de huella protegidas por HMAC</text>
+    <text x="44" y="625" fill="#334155" font-size="10">• <tspan font-weight="700">POST .../face</tspan> : Verificación con reto de atestación criptográfica</text>
+    <text x="44" y="641" fill="#334155" font-size="10">• <tspan font-weight="700">GET .../ballot</tspan> : Boleta ordenada (Alcalde → Gobernador → Presidente)</text>
+    <text x="44" y="657" fill="#334155" font-size="10">• <tspan font-weight="700">POST .../vote</tspan> : Transacción atómica de voto disociado y anónimo</text>
+  </g>
+
+  <!-- Cámara Física a la derecha de la Pi -->
+  <g transform="translate(950, 150)">
+    <rect x="0" y="0" width="300" height="90" rx="12" fill="#FFFFFF" stroke="#0B1F3A" stroke-width="2" filter="url(#shadow)" />
+    <text x="20" y="30" fill="#0B1F3A" font-size="14" font-weight="700">Cámara de Casilla (USB / CSI)</text>
+    <text x="20" y="50" fill="#475569" font-size="11">Sensor de imagen en vivo (1280x720 px)</text>
+    <text x="20" y="68" fill="#059669" font-size="10" font-weight="600">No almacena fotos en disco (Solo memoria RAM)</text>
+    
+    <!-- Flecha física cámara a módulo facial -->
+    <path d="M 0 45 L -65 45 L -65 260 L -68 260" stroke="#1F4E9C" stroke-width="2.5" marker-end="url(#arrow-blue)" />
+    <text x="-60" y="100" fill="#1F4E9C" font-size="10" font-weight="700" transform="rotate(90 -60 100)">Bus USB / CSI (Físico)</text>
+  </g>
+
+  <!-- ========================================== -->
+  <!-- SECCIÓN DERECHA: BASE DE DATOS EN LA NUBE -->
+  <!-- ========================================== -->
+  <g transform="translate(950, 480)">
+    <rect x="0" y="0" width="300" height="340" rx="16" fill="#FFFFFF" stroke="#059669" stroke-width="2.5" filter="url(#shadow)" />
+    <rect x="0" y="0" width="300" height="42" rx="16" fill="#ECFDF5" />
+    <rect x="0" y="24" width="300" height="18" fill="#ECFDF5" />
+    <text x="16" y="28" fill="#065F46" font-size="15" font-weight="700">Base de Datos PostgreSQL (Neon)</text>
+
+    <text x="20" y="65" fill="#0F172A" font-size="12" font-weight="700">Tablas y Esquema del Padrón:</text>
+
+    <rect x="15" y="75" width="270" height="45" rx="6" fill="#F8FAFC" stroke="#CBD5E1" stroke-width="1" />
+    <text x="24" y="93" fill="#0B1F3A" font-size="11" font-weight="700">Voter (Padrón Nominal)</text>
+    <text x="24" y="109" fill="#475569" font-size="9">cardUid, fingerprintSlot, faceEmbedding (AES), hasVoted</text>
+
+    <rect x="15" y="125" width="270" height="45" rx="6" fill="#F8FAFC" stroke="#CBD5E1" stroke-width="1" />
+    <text x="24" y="143" fill="#0B1F3A" font-size="11" font-weight="700">Candidate (Candidatos y Partidos)</text>
+    <text x="24" y="159" fill="#475569" font-size="9">name, party, office (PRESIDENT, GOVERNOR, MAYOR), región</text>
+
+    <rect x="15" y="175" width="270" height="45" rx="6" fill="#F8FAFC" stroke="#CBD5E1" stroke-width="1" />
+    <text x="24" y="193" fill="#0B1F3A" font-size="11" font-weight="700">VoteSession y FingerprintCommand</text>
+    <text x="24" y="209" fill="#475569" font-size="9">Control temporal de factores biométricos y orden única</text>
+
+    <rect x="15" y="225" width="270" height="45" rx="6" fill="#F8FAFC" stroke="#CBD5E1" stroke-width="1" />
+    <text x="24" y="243" fill="#0B1F3A" font-size="11" font-weight="700">DeviceReplayGuard y DeviceNonce</text>
+    <text x="24" y="259" fill="#475569" font-size="9">Seguridad anti-repetición por secuencia de hardware</text>
+
+    <rect x="15" y="275" width="270" height="45" rx="6" fill="#ECFDF5" stroke="#10B981" stroke-width="1" />
+    <text x="24" y="293" fill="#065F46" font-size="11" font-weight="700">Ballot (Urna Digital Anónima)</text>
+    <text x="24" y="309" fill="#047857" font-size="9">candidateId aislado (Sin votante ni sesión asociada)</text>
+  </g>
+
+  <!-- ========================================== -->
+  <!-- CONEXIONES INALÁMBRICAS Y DE RED -->
+  <!-- ========================================== -->
+
+  <!-- Wi-Fi 1: Pi Adaptador NFC <-> ESP32 NFC -->
+  <path d="M 460 480 L 390 480 L 390 380 L 360 380" stroke="#D97706" stroke-width="2.5" stroke-dasharray="6,4" marker-end="url(#arrow-orange)" fill="none" />
+  <rect x="365" y="420" width="105" height="42" rx="6" fill="#FFFBEB" stroke="#F59E0B" stroke-width="1" />
+  <text x="372" y="436" fill="#B45309" font-size="9" font-weight="700">Wi-Fi LAN (80)</text>
+  <text x="372" y="450" fill="#92400E" font-size="8">POST /v1/nfc/scan</text>
+
+  <!-- Wi-Fi 2: ESP32 Huella <-> FastAPI -->
+  <path d="M 360 740 L 410 740 L 410 650 L 460 650" stroke="#7C3AED" stroke-width="2.5" stroke-dasharray="6,4" marker-end="url(#arrow-purple)" fill="none" />
+  <rect x="365" y="685" width="105" height="42" rx="6" fill="#FAF5FF" stroke="#A855F7" stroke-width="1" />
+  <text x="372" y="701" fill="#6B21A8" font-size="9" font-weight="700">Wi-Fi LAN (8000)</text>
+  <text x="372" y="715" fill="#581C87" font-size="8">Polling + HMAC-SHA256</text>
+
+  <!-- Internet TLS: FastAPI <-> Base de Datos Neon -->
+  <path d="M 920 620 L 950 620" stroke="#059669" stroke-width="3" marker-end="url(#arrow-green)" fill="none" />
+  <rect x="895" y="585" width="90" height="26" rx="4" fill="#ECFDF5" stroke="#10B981" stroke-width="1" />
+  <text x="901" y="602" fill="#065F46" font-size="9" font-weight="700">TLS (sslmode)</text>
+
+  <!-- ========================================== -->
+  <!-- BARRA DE LEYENDA INFERIOR -->
+  <!-- ========================================== -->
+  <g transform="translate(40, 845)">
+    <rect x="0" y="0" width="1220" height="55" rx="10" fill="#FFFFFF" stroke="#CBD5E1" stroke-width="1.5" />
+    
+    <text x="20" y="32" fill="#0B1F3A" font-size="12" font-weight="700">LEYENDA DE CONEXIONES:</text>
+
+    <!-- Conexión física -->
+    <line x1="200" y1="28" x2="240" y2="28" stroke="#1F4E9C" stroke-width="3" />
+    <text x="250" y="32" fill="#334155" font-size="12">Conexión Física (Cable SPI / UART / GPIO / USB)</text>
+
+    <!-- Conexión inalámbrica Wi-Fi -->
+    <line x1="560" y1="28" x2="600" y2="28" stroke="#D97706" stroke-width="2.5" stroke-dasharray="6,4" />
+    <text x="610" y="32" fill="#334155" font-size="12">Enlace Inalámbrico Wi-Fi (HTTP firmado con HMAC-SHA256)</text>
+
+    <!-- Conexión Internet TLS -->
+    <line x1="990" y1="28" x2="1030" y2="28" stroke="#059669" stroke-width="3" />
+    <text x="1040" y="32" fill="#334155" font-size="12">Conexión a Internet Cifrada (TCP / TLS)</text>
+  </g>
+</svg>
