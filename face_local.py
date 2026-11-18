@@ -48,6 +48,17 @@ class FaceCamera:
         if self._cv2 is not None:
             self._cv2.destroyAllWindows()
 
+    def capture_photo_bytes(self) -> Optional[bytes]:
+        if self.cap is None or self._cv2 is None:
+            return None
+        ok, frame = self.cap.read()
+        if not ok or frame is None:
+            return None
+        success, encoded = self._cv2.imencode(".jpg", frame)
+        if success:
+            return encoded.tobytes()
+        return None
+
     def capture_single_encoding(self):
         import face_recognition
         if self.cap is None or self._cv2 is None:
@@ -64,7 +75,7 @@ class FaceCamera:
             raise FaceRejected("Se detectó más de un rostro; la verificación requiere exactamente uno.")
         encodings = face_recognition.face_encodings(rgb, locations, model="large")
         if len(encodings) != 1 or np.asarray(encodings[0]).shape != (128,):
-            raise FaceRejected("No se pudo obtener un encoding facial válido.")
+            raise FaceVerificationError("No se pudo obtener un encoding facial válido.")
         return np.asarray(encodings[0], dtype=np.float64)
 
 

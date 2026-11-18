@@ -129,6 +129,9 @@ class TestSubmitSafety(FlowTestCase):
 class TestErrors(FlowTestCase):
     def test_exception_on_submit_is_uncertain_not_success(self):
         class Boom:
+            def check_lock(self):
+                return {"isLocked": False}
+
             def load_ballot(self, ref):
                 return BALLOT
 

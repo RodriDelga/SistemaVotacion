@@ -14,8 +14,34 @@
 #define PN532_MISO 19
 #define PN532_MOSI 23
 #define PN532_SS 5
+
+// Buzzer de 2 patas en lado VIN (GPIO 4)
+#define BUZZER_PIN 4
+
 const unsigned long SCAN_TIMEOUT_MS = 20000;
 const size_t MAX_BODY = 2048;
+
+void buzzerInit() {
+  pinMode(BUZZER_PIN, OUTPUT);
+  digitalWrite(BUZZER_PIN, LOW);
+}
+
+void buzzerBeep(int durationMs) {
+  unsigned long start = millis();
+  while (millis() - start < (unsigned long)durationMs) {
+    digitalWrite(BUZZER_PIN, HIGH);
+    delayMicroseconds(200);
+    digitalWrite(BUZZER_PIN, LOW);
+    delayMicroseconds(200);
+  }
+  digitalWrite(BUZZER_PIN, LOW);
+}
+
+void buzzerSuccess() {
+  buzzerBeep(80);
+  delay(50);
+  buzzerBeep(120);
+}
 
 Adafruit_PN532 nfc(PN532_SS);
 WebServer server(80);
@@ -56,11 +82,11 @@ String hmacHex(const String& message) {
     return "";
   }
   memset(key, 0, sizeof(key));
-  static const char HEX[] = "0123456789abcdef";
+  static const char hexChars[] = "0123456789abcdef";
   String result;
   for (uint8_t byte : output) {
-    result += HEX[byte >> 4];
-    result += HEX[byte & 15];
+    result += hexChars[byte >> 4];
+    result += hexChars[byte & 15];
   }
   return result;
 }
@@ -129,6 +155,12 @@ bool configureTime() {
   return timeReady();
 }
 
+void handleHealth() {
+  bool ready = nfcReady && timeReady() && nfc.getFirmwareVersion() != 0;
+  server.send(ready ? 200 : 503, "application/json",
+              ready ? "{\"status\":\"online\"}" : "{\"status\":\"offline\"}");
+}
+
 void handleScan() {
   if (!nfcReady || !timeReady()) {
     sendError(503, "reader_not_ready");
@@ -158,7 +190,7 @@ void handleScan() {
     return;
   }
   String expected = hmacHex(commandCanonical(deviceId, sessionId, action, nonce,
-                                              sequence, expiresAt));
+                                             sequence, expiresAt));
   if (!constantTimeEqual(provided, expected)) {
     sendError(401, "command_rejected");
     return;
@@ -179,34 +211,51 @@ void handleScan() {
         status = "invalid_read";
         break;
       }
-      static const char HEX[] = "0123456789ABCDEF";
+      static const char hexChars[] = "0123456789ABCDEF";
       for (uint8_t i = 0; i < uidLength; i++) {
-        uid += HEX[rawUid[i] >> 4];
-        uid += HEX[rawUid[i] & 15];
+        uid += hexChars[rawUid[i] >> 4];
+        uid += hexChars[rawUid[i] & 15];
       }
       status = "ok";
+      buzzerSuccess(); // Sonido de confirmación al aceptar tarjeta
       break;
     }
     delay(20);
   }
-  sendSignedResponse(sessionId, nonce, sequence, status, uid); // nunca registra el UID
+  sendSignedResponse(sessionId, nonce, sequence, status, uid);
 }
 
 void setup() {
-  Serial.begin(115200); // solo diagnóstico; no interviene en la comunicación
+  Serial.begin(115200);
+  delay(500);
+  buzzerInit();
+  Serial.println("Iniciando...");
+
   preferences.begin("nfc-security", false);
   lastSequence = preferences.getULong64("lastSeq", 0);
   SPI.begin(PN532_SCK, PN532_MISO, PN532_MOSI, PN532_SS);
   nfc.begin();
   nfcReady = nfc.getFirmwareVersion() != 0;
+  Serial.println(nfcReady ? "PN532: OK" : "PN532: NO detectado");
   if (nfcReady) nfc.SAMConfig();
+
   WiFi.mode(WIFI_STA);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
   unsigned long started = millis();
   while (WiFi.status() != WL_CONNECTED && millis() - started < 15000) delay(250);
-  if (WiFi.status() == WL_CONNECTED) configureTime();
+
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.print("WiFi: OK, IP ");
+    Serial.println(WiFi.localIP());
+    Serial.println(configureTime() ? "NTP: OK" : "NTP: FALLO");
+  } else {
+    Serial.println("WiFi: FALLO");
+  }
+
+  server.on("/v1/nfc/health", HTTP_GET, handleHealth);
   server.on("/v1/nfc/scan", HTTP_POST, handleScan);
   server.begin();
+  Serial.println("Servidor HTTP listo");
 }
 
 void loop() {

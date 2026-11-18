@@ -27,7 +27,7 @@ INACTIVE_PHASES = (Phase.AUTH, Phase.VERIFIED, Phase.SELECTING, Phase.REVIEW)
 PHASE_SCREEN = {
     Phase.IDLE: "welcome", Phase.AUTH: "auth", Phase.VERIFIED: "verified", Phase.LOADING: "loading",
     Phase.SELECTING: "selection", Phase.REVIEW: "review", Phase.SUBMITTING: "review",
-    Phase.RESULT: "result", Phase.ERROR: "result",
+    Phase.RESULT: "result", Phase.ERROR: "result", Phase.LOCKED: "locked",
 }
 STAGE_TEXT = {
     Phase.IDLE: "Inicio",
@@ -36,6 +36,7 @@ STAGE_TEXT = {
     Phase.SELECTING: "Paso 2 de 4 · Selección",
     Phase.REVIEW: "Paso 3 de 4 · Revisión y envío", Phase.SUBMITTING: "Paso 3 de 4 · Revisión y envío",
     Phase.RESULT: "Paso 4 de 4 · Resultado", Phase.ERROR: "Resultado",
+    Phase.LOCKED: "Dispositivo Bloqueado por Seguridad",
 }
 STEP_NAMES = {Step.CARD: "Tarjeta", Step.FINGERPRINT: "Huella dactilar", Step.FACE: "Reconocimiento facial"}
 STEP_HINTS = {
@@ -194,7 +195,11 @@ class AuthScreen(Screen):
             status.configure(text=text, text_color=color)
             frame.configure(border_color=color if st in (StepStatus.ACTIVE, StepStatus.FAILED) else C.BORDER)
         if c.failed_step is not None:
-            self._msg.configure(text=c.step_message, text_color=C.ERR)
+            remaining = c.attempts_remaining.get(c.failed_step)
+            message = c.step_message
+            if remaining is not None:
+                message += f"\nIntentos restantes: {remaining}"
+            self._msg.configure(text=message, text_color=C.ERR)
             self._retry.configure(text="Intentar de nuevo" if c.failed_step is Step.CARD else "Reintentar")
             self._retry.grid()
         else:
@@ -259,15 +264,19 @@ class CandidateCard(ctk.CTkFrame):
         self._lbl_photo = ctk.CTkLabel(self, text="", image=self._img)
         self._lbl_name = ctk.CTkLabel(self, text=candidate.name, font=t.font(30, True),
                                       text_color=C.NAVY, wraplength=wrap, justify="center")
+        party_text = candidate.party or ""
+        self._lbl_party = ctk.CTkLabel(self, text=party_text, font=t.font(22),
+                                       text_color=C.MUTED, wraplength=wrap, justify="center")
         self._lbl_role = ctk.CTkLabel(self, text=role, font=t.font(24), text_color=C.MUTED,
                                       wraplength=wrap, justify="center")
         self._lbl_tag = ctk.CTkLabel(self, text="Toque para elegir", font=t.font(24, True),
                                      text_color=C.BLUE)
         self._lbl_photo.pack(padx=t.s(22), pady=(t.s(22), t.s(8)))
         self._lbl_name.pack(padx=t.s(12))
+        self._lbl_party.pack(padx=t.s(12), pady=(t.s(2), 0))
         self._lbl_role.pack(padx=t.s(12), pady=(t.s(2), t.s(6)))
         self._lbl_tag.pack(pady=(0, t.s(18)))
-        for w in (self, self._lbl_photo, self._lbl_name, self._lbl_role, self._lbl_tag):
+        for w in (self, self._lbl_photo, self._lbl_name, self._lbl_party, self._lbl_role, self._lbl_tag):
             w.bind("<Button-1>", self._pressed)
 
     def _pressed(self, _event=None) -> None:
@@ -396,9 +405,16 @@ class ReviewScreen(Screen):
         self._send.grid(row=0, column=1, padx=t.s(14))
         self._guard = ConfirmGuard()
         self._change_btns: list[ctk.CTkButton] = []
+        self._confirm_overlay: Optional[ctk.CTkFrame] = None
 
     def on_show(self) -> None:
         self._guard.disarm()
+        if self._confirm_overlay is not None:
+            try:
+                self._confirm_overlay.destroy()
+            except Exception:
+                pass
+            self._confirm_overlay = None
         for w in self._rows.winfo_children():
             w.destroy()
         self._change_btns = []
@@ -417,6 +433,8 @@ class ReviewScreen(Screen):
             txt.pack(side="left", padx=(0, t.s(20)))
             self.label(txt, pos.title, 24, color=C.MUTED, anchor="w", width=t.s(620)).pack(anchor="w")
             self.label(txt, cand.name, 34, True, C.NAVY, anchor="w", width=t.s(620)).pack(anchor="w")
+            if cand.party:
+                self.label(txt, cand.party, 24, True, C.MUTED, anchor="w", width=t.s(620)).pack(anchor="w")
             btn = t.button(row, "Cambiar", lambda i=i: c.edit(i), "secondary",
                            width=t.s(200), compact=True)
             btn.pack(side="right", padx=t.s(18))
@@ -426,9 +444,55 @@ class ReviewScreen(Screen):
         self._guard.press(self._cancel, "Cancelar", "Toque de nuevo para cancelar", self.c.reset)
 
     def _on_send(self) -> None:
-        # submit() bloquea el envío y notifica de forma síncrona: la UI queda
-        # deshabilitada antes de que pueda procesarse otro clic.
-        self.c.submit()
+        if self._confirm_overlay is not None:
+            return
+
+        t = self.t
+        parent = self.winfo_toplevel()
+
+        # Modal overlay que cubre toda la ventana para bloquear clics de fondo
+        self._confirm_overlay = ctk.CTkFrame(parent, fg_color=C.NAVY, corner_radius=0)
+        self._confirm_overlay.place(relx=0, rely=0, relwidth=1, relheight=1)
+        self._confirm_overlay.tkraise()
+
+        # Tarjeta modal central
+        card = ctk.CTkFrame(self._confirm_overlay, fg_color=C.SURFACE, corner_radius=t.s(24),
+                            border_width=t.s(3), border_color=C.BORDER)
+        card.place(relx=0.5, rely=0.5, anchor="center")
+
+        pad_x = t.s(56)
+        pad_y = t.s(44)
+
+        self.label(card, "Confirmar voto", 34, True, C.NAVY).pack(
+            padx=pad_x, pady=(pad_y, t.s(12)))
+        self.label(card, "¿Está seguro de su decisión?", 46, True, C.BLUE).pack(
+            padx=pad_x, pady=(0, t.s(14)))
+        self.label(card, "Una vez enviado, su voto no podrá modificarse ni cancelarse.",
+                   26, False, C.MUTED, justify="center").pack(
+            padx=pad_x, pady=(0, t.s(36)))
+
+        btn_box = ctk.CTkFrame(card, fg_color="transparent")
+        btn_box.pack(padx=pad_x, pady=(0, pad_y))
+
+        def _close_overlay():
+            if self._confirm_overlay is not None:
+                try:
+                    self._confirm_overlay.destroy()
+                except Exception:
+                    pass
+                self._confirm_overlay = None
+
+        def _cancel():
+            _close_overlay()
+
+        def _confirm():
+            _close_overlay()
+            self.c.submit()
+
+        t.button(btn_box, "Regresar", _cancel, "secondary", width=t.s(260), big=True).pack(
+            side="left", padx=t.s(14))
+        t.button(btn_box, "Sí, enviar voto", _confirm, width=t.s(360), big=True).pack(
+            side="left", padx=t.s(14))
 
     def refresh(self) -> None:
         sending = self.c.phase is Phase.SUBMITTING
@@ -450,6 +514,12 @@ class ReviewScreen(Screen):
                 self._bar_on = False
 
     def on_hide(self) -> None:
+        if self._confirm_overlay is not None:
+            try:
+                self._confirm_overlay.destroy()
+            except Exception:
+                pass
+            self._confirm_overlay = None
         if self._bar_on:
             self._bar.stop()
             self._bar_on = False
@@ -515,6 +585,104 @@ class ResultScreen(Screen):
             self._countdown.configure(text=f"Volviendo al inicio en {left} s")
 
 
+# ------------------------------------------------------------- bloqueo global
+class LockedScreen(Screen):
+    """Pantalla de bloqueo de seguridad del Kiosk. Requiere tarjeta de admin para continuar."""
+
+    def __init__(self, master, app) -> None:
+        super().__init__(master, app)
+        t = self.t
+        box = ctk.CTkFrame(self, fg_color="transparent")
+        box.place(relx=0.5, rely=0.48, anchor="center")
+
+        # Insignia de alerta de seguridad
+        shield_frame = ctk.CTkFrame(box, fg_color="#FFEBEE", border_width=3, border_color=C.ERR,
+                                    corner_radius=t.s(24), width=t.s(120), height=t.s(120))
+        shield_frame.pack(pady=(0, t.s(16)))
+        shield_frame.pack_propagate(False)
+        self.label(shield_frame, "🔒", 56, True, C.ERR).place(relx=0.5, rely=0.5, anchor="center")
+
+        self.label(box, "DISPOSITIVO BLOQUEADO", 48, True, C.ERR).pack()
+        self.label(box, "Bloqueo preventivo por seguridad", 28, True, C.NAVY).pack(pady=(t.s(4), t.s(18)))
+
+        # Panel de detalles
+        info_panel = ctk.CTkFrame(box, fg_color=C.SURFACE, border_width=2, border_color=C.BORDER,
+                                  corner_radius=t.s(16), width=t.s(820))
+        info_panel.pack(padx=t.s(20), pady=(0, t.s(20)), fill="x")
+
+        self._reason_lbl = self.label(
+            info_panel, "", 24, False, C.TEXT, wraplength=t.s(760), justify="center"
+        )
+        self._reason_lbl.pack(padx=t.s(20), pady=(t.s(14), t.s(6)))
+
+        self._incident_lbl = self.label(
+            info_panel, "", 20, False, C.MUTED, wraplength=t.s(760), justify="center"
+        )
+        self._incident_lbl.pack(padx=t.s(20), pady=(0, t.s(14)))
+
+        # Indicación de desbloqueo físico
+        unlock_box = ctk.CTkFrame(box, fg_color="#F1F5F9", border_width=2, border_color="#CBD5E1",
+                                  corner_radius=t.s(16))
+        unlock_box.pack(fill="x", padx=t.s(20), pady=(0, t.s(14)))
+
+        self.label(unlock_box, "Desbloqueo de Administrador", 24, True, C.NAVY).pack(
+            padx=t.s(20), pady=(t.s(12), t.s(4))
+        )
+        self.label(
+            unlock_box,
+            "Acerque una tarjeta de administrador autorizada al lector NFC para reactivar el equipo.",
+            22, False, C.MUTED, justify="center", wraplength=t.s(760),
+        ).pack(padx=t.s(20), pady=(0, t.s(12)))
+
+        # Mensaje de estado de desbloqueo (ej. tarjeta rechazada)
+        self._status_lbl = self.label(
+            box, "", 24, True, C.ERR, wraplength=t.s(800), justify="center"
+        )
+        self._status_lbl.pack(pady=(t.s(4), t.s(10)))
+
+        # En modo demo, agregar opción para simular tarjeta de admin
+        if app.demo is not None:
+            self._build_admin_demo(app.demo, box)
+
+    def _build_admin_demo(self, demo: DemoHooks, parent) -> None:
+        t = self.t
+        panel = ctk.CTkFrame(parent, fg_color="#FFF8E1", border_width=2, border_color="#E0B84C",
+                             corner_radius=t.s(12))
+        panel.pack(pady=(t.s(6), 0))
+        row = ctk.CTkFrame(panel, fg_color="transparent")
+        row.pack(padx=t.s(16), pady=t.s(10))
+        self.label(row, "Demo Admin:", 20, True, "#5C4300").pack(side="left", padx=(0, t.s(10)))
+        t.button(
+            row, "Simular Tarjeta Admin Autorizada",
+            lambda: self._sim_admin("ADMIN001"), compact=True, width=t.s(320)
+        ).pack(side="left", padx=t.s(6))
+        t.button(
+            row, "Simular Tarjeta No Autorizada",
+            lambda: self._sim_admin("TARJETA_FALSA"), "secondary", compact=True, width=t.s(280)
+        ).pack(side="left", padx=t.s(6))
+
+    def _sim_admin(self, uid: str) -> None:
+        if hasattr(self.app.demo, "tap_admin_card"):
+            self.app.demo.tap_admin_card(uid)
+
+    def refresh(self) -> None:
+        c = self.c
+        reason = c.lock_reason or "Se ha alcanzado el límite máximo de intentos de autenticación permitidos."
+        self._reason_lbl.configure(text=f"Motivo: {reason}")
+        photo_text = {
+            "PHOTO_PENDING": "Captura y envío de evidencia pendientes",
+            "PHOTO_STORED": "Evidencia fotográfica registrada",
+            "CAMERA_ERROR": "Incidente registrado sin foto por fallo de captura",
+            "PHOTO_UNAVAILABLE": "Incidente registrado sin foto",
+            "UPLOAD_ERROR": "Incidente registrado. No se pudo confirmar el envío de la foto",
+        }.get(c.photo_status, "")
+        inc_text = f"Incidente {c.incident_id}" if c.incident_id else "Consultando el estado del incidente…"
+        self._incident_lbl.configure(text=" · ".join(filter(None, (inc_text, photo_text))))
+        default = "Esperando tarjeta de administrador…" if c.photo_status != "PHOTO_PENDING" else "Preparando evidencia…"
+        self._status_lbl.configure(text=c.admin_unlock_message or default, text_color=C.MUTED)
+
+
+
 # ------------------------------------------------------------------ ventana
 class KioskApp(ctk.CTk):
     def __init__(self, controller: VotingController, demo: Optional[DemoHooks] = None,
@@ -552,6 +720,7 @@ class KioskApp(ctk.CTk):
             "verified": VerifiedScreen(body, self), "loading": LoadingScreen(body, self),
             "selection": SelectionScreen(body, self),
             "review": ReviewScreen(body, self), "result": ResultScreen(body, self),
+            "locked": LockedScreen(body, self),
         }
         for s in self._screens.values():
             s.grid(row=0, column=0, sticky="nsew")

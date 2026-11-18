@@ -40,6 +40,10 @@ class BackendIntegrationTest(unittest.TestCase):
         cls.key = bytes.fromhex(os.environ["FINGERPRINT_HMAC_KEY"])
         cls.sequence = 0
 
+    @classmethod
+    def tearDownClass(cls):
+        backend.engine.dispose()
+
     def setUp(self):
         with Session(backend.engine) as db:
             for model in (
@@ -92,6 +96,8 @@ class BackendIntegrationTest(unittest.TestCase):
             "X-Device-Id": "fingerprint-esp32-01", "X-Timestamp": str(timestamp),
             "X-Nonce": nonce, "X-Sequence": str(self.sequence), "X-Signature": signature,
         }
+        if payload is not None:
+            headers["Content-Type"] = "application/json"
         response = self.client.request(method, path, headers=headers, content=content)
         if response.headers.get("X-Signature"):
             expected = fingerprint_response_signature(

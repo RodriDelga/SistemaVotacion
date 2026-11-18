@@ -99,7 +99,7 @@ class VotingApi:
                     candidate_id = str(int(raw["candidateId"]))
                 except (KeyError, TypeError, ValueError) as exc:
                     raise ApiError("La boleta contiene un identificador inválido.") from exc
-                candidates.append(Candidate(candidate_id, raw["name"], office))
+                candidates.append(Candidate(candidate_id, raw["name"], office, raw.get("party")))
             positions.append(Position(office, OFFICE_TITLES[office], tuple(candidates)))
         if [p.id for p in positions] != ["MAYOR", "GOVERNOR", "PRESIDENT"]:
             raise ApiError("La boleta no respeta el orden de cargos configurado.")
@@ -112,6 +112,8 @@ class VotingApi:
             }
             data = self._request("POST", f"/api/v1/session/{session_id}/vote", json=payload)
         except ApiError as exc:
+            if exc.status_code == 423:
+                raise
             if exc.status_code is not None and 400 <= exc.status_code < 500:
                 # Un 4xx definitivo confirma que esta petición no fue aceptada.
                 return SubmitResult(SubmitOutcome.REJECTED, str(exc))
@@ -124,3 +126,22 @@ class VotingApi:
 
     def cancel_session(self, session_id: str) -> None:
         self._request("POST", f"/api/v1/session/{session_id}/cancel")
+
+    def check_lock(self) -> dict[str, Any]:
+        return self._request("GET", "/api/v1/kiosk/lock")
+
+    def report_heartbeat(self, components: Mapping[str, str]) -> None:
+        self._request("POST", "/api/v1/device/heartbeat", json={"components": dict(components)})
+
+    def close(self) -> None:
+        self._http.close()
+
+    def unlock_device(self, scan: dict) -> dict[str, Any]:
+        return self._request("POST", "/api/v1/kiosk/unlock", json={"scan": scan})
+
+    def report_incident(self, incident_id: str, photo_bytes: Optional[bytes]) -> dict[str, Any]:
+        payload = {"id": incident_id, "captureFailed": photo_bytes is None}
+        if photo_bytes is not None:
+            import base64
+            payload["photoBase64"] = base64.b64encode(photo_bytes).decode("ascii")
+        return self._request("POST", "/api/v1/security/incidents", json=payload)

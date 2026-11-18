@@ -5,8 +5,10 @@
 
 import base64
 import binascii
+import io
 import json
 import os
+import re
 import secrets
 import unicodedata
 import uuid
@@ -17,13 +19,16 @@ from typing import List, Literal, Optional
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field as PydanticField
-from sqlalchemy import func, update
+from sqlalchemy import delete, func, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from PIL import Image, UnidentifiedImageError
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Field, Session, SQLModel, col, create_engine, select
 
 from common.hmac_protocol import (
     face_attestation_signature, fingerprint_request_signature,
-    fingerprint_response_signature, load_hex_key, signature_matches,
+    fingerprint_response_signature, load_hex_key, nfc_response_signature, signature_matches,
 )
 
 DATABASE_URL = os.getenv("DATABASE_URL", "")
@@ -41,6 +46,12 @@ OFFICE_ORDER = [OFFICE_MAYOR, OFFICE_GOVERNOR, OFFICE_PRESIDENT]
 FINGERPRINT_DEVICE_ID = os.getenv("FINGERPRINT_DEVICE_ID", "fingerprint-esp32-01")
 DEVICE_MAX_SKEW_SECONDS = int(os.getenv("DEVICE_MAX_SKEW_SECONDS", "120"))
 
+DEFAULT_KIOSK_DEVICE_ID = os.getenv("KIOSK_DEVICE_ID", "kiosk-01")
+INCIDENT_PHOTO_RETENTION_DAYS = max(1, int(os.getenv("INCIDENT_PHOTO_RETENTION_DAYS", "30")))
+MAX_PHOTO_BYTES = 2 * 1024 * 1024
+NFC_DEVICE_ID = os.getenv("NFC_DEVICE_ID", "nfc-esp32-01")
+
+
 class Voter(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     fullName: str
@@ -56,6 +67,7 @@ class Voter(SQLModel, table=True):
 class Candidate(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     name: str
+    party: Optional[str] = Field(default=None)
     office: str = Field(index=True)
     stateName: Optional[str] = Field(default=None, index=True)
     municipalityName: Optional[str] = Field(default=None, index=True)
@@ -106,6 +118,86 @@ class Ballot(SQLModel, table=True):
     candidateId: int = Field(foreign_key="candidate.id")
 
 
+class AdminCard(SQLModel, table=True):
+    """Tarjetas NFC de administradores autorizados para desbloquear la urna."""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    cardUid: str = Field(index=True, unique=True)
+    adminName: str = Field(default="Administrador")
+    isEnabled: bool = Field(default=True)
+    createdAt: datetime
+    updatedAt: Optional[datetime] = None
+
+
+class KioskLock(SQLModel, table=True):
+    """Estado global y persistente de bloqueo del Kiosk."""
+    deviceId: str = Field(primary_key=True)
+    isLocked: bool = Field(default=False)
+    lockedAt: Optional[datetime] = None
+    reason: Optional[str] = None
+    lockedByAttemptType: Optional[str] = None  # FINGERPRINT / FACE / MANUAL
+    incidentId: Optional[str] = None
+    unlockedAt: Optional[datetime] = None
+    unlockedByCardUid: Optional[str] = None
+
+
+class SecurityIncident(SQLModel, table=True):
+    """Registro de incidente de seguridad con referencia protegida a fotografia."""
+    id: str = Field(primary_key=True)
+    deviceId: str = Field(index=True)
+    timestamp: datetime
+    authType: str  # FINGERPRINT / FACE / GENERAL
+    eventType: str  # MAX_ATTEMPTS_EXCEEDED / SECURITY_ALERT
+    userRef: Optional[str] = None
+    photoPath: Optional[str] = None
+    status: str = Field(default="OPEN")
+    details: Optional[str] = None
+
+
+class IncidentPhoto(SQLModel, table=True):
+    incidentId: str = Field(primary_key=True, foreign_key="securityincident.id")
+    jpeg: bytes
+    capturedAt: datetime = Field(index=True)
+
+
+class KioskUnlockAudit(SQLModel, table=True):
+    incidentId: str = Field(primary_key=True, foreign_key="securityincident.id")
+    adminCardId: int
+    scanNonce: str
+    adminName: str
+    unlockedAt: datetime
+
+
+class LockKioskRequest(BaseModel):
+    reason: str = PydanticField(default="Bloqueo por seguridad", max_length=500)
+
+
+class NfcScanProof(BaseModel):
+    deviceId: str
+    sessionId: str
+    nonce: str = PydanticField(min_length=16, max_length=128)
+    sequence: int = PydanticField(gt=0, le=2**63-1)
+    expiresAt: int
+    status: Literal["ok"]
+    uid: str = PydanticField(pattern=r"^[0-9A-F]{8,20}$")
+    hmac: str = PydanticField(pattern=r"^[0-9a-fA-F]{64}$")
+
+
+class UnlockKioskRequest(BaseModel):
+    scan: NfcScanProof
+
+
+class AdminCardEnrollRequest(BaseModel):
+    cardUid: str = PydanticField(min_length=1, max_length=100)
+    adminName: str = PydanticField(default="Administrador", min_length=1, max_length=200)
+    isEnabled: bool = True
+
+
+class IncidentReportRequest(BaseModel):
+    id: uuid.UUID
+    photoBase64: Optional[str] = PydanticField(default=None, max_length=4 * ((MAX_PHOTO_BYTES + 2) // 3))
+    captureFailed: bool = False
+
+
 class EnrollVoterRequest(BaseModel):
     fullName: str = PydanticField(min_length=1, max_length=200)
     cardUid: str = PydanticField(min_length=1, max_length=100)
@@ -129,6 +221,7 @@ class FaceVerificationRequest(BaseModel):
 
 class CandidateRequest(BaseModel):
     name: str
+    party: Optional[str] = None
     office: Literal["PRESIDENT", "GOVERNOR", "MAYOR"]
     stateName: Optional[str] = None
     municipalityName: Optional[str] = None
@@ -186,7 +279,6 @@ def verifyAdminKey(adminKey: str = Header(default="", alias="X-Admin-Key")):
     if not ADMIN_KEY or not secrets.compare_digest(adminKey, ADMIN_KEY):
         raise HTTPException(status_code=401, detail="Credencial administrativa invalida")
 
-
 async def verifyFingerprintDevice(request: Request, db: Session = Depends(getDbSession)):
     """Autentica a la ESP32 de huellas y consume nonce/secuencia antes de actuar."""
     headers = request.headers
@@ -213,6 +305,13 @@ async def verifyFingerprintDevice(request: Request, db: Session = Depends(getDbS
         raise HTTPException(status_code=401, detail="Firma de dispositivo invalida")
 
     guard = db.get(DeviceReplayGuard, deviceId)
+    last_sequence = guard.lastSequence if guard else 0
+    print(
+        f"[DIAGNOSTICO HMAC] "
+        f"Secuencia recibida: {sequence} | "
+        f"Ultima secuencia aceptada: {last_sequence}"
+    )
+
     now = getUtcNow()
     if guard is None:
         db.add(DeviceReplayGuard(deviceId=deviceId, lastSequence=sequence, updatedAt=now))
@@ -235,7 +334,6 @@ async def verifyFingerprintDevice(request: Request, db: Session = Depends(getDbS
         db.rollback()
         raise HTTPException(status_code=409, detail="Mensaje de dispositivo repetido") from exc
     request.state.fingerprint_device = {"deviceId": deviceId, "nonce": nonce}
-
 
 def signedDeviceResponse(request: Request, payload: dict, statusCode: int = 200) -> Response:
     context = request.state.fingerprint_device
@@ -384,11 +482,54 @@ def hasPendingFingerprintCommand(db: Session, sessionId: str) -> bool:
     return any(now - toUtcAware(command.createdAt) <= maxAge for command in commands)
 
 
+def kiosk_state_for_update(db: Session) -> KioskLock:
+    """Serialize voting mutations and lock transitions on the configured kiosk row."""
+    insert = sqlite_insert if db.get_bind().dialect.name == "sqlite" else pg_insert
+    row = insert(KioskLock).values(deviceId=DEFAULT_KIOSK_DEVICE_ID, isLocked=False)
+    db.exec(row.on_conflict_do_update(index_elements=["deviceId"], set_={"deviceId": row.excluded.deviceId}))
+    return db.get(KioskLock, DEFAULT_KIOSK_DEVICE_ID, populate_existing=True)
+
+
+def is_kiosk_locked(db: Session) -> bool:
+    lock = db.get(KioskLock, DEFAULT_KIOSK_DEVICE_ID)
+    return bool(lock and lock.isLocked)
+
+
+def require_kiosk_available(db: Session) -> None:
+    if kiosk_state_for_update(db).isLocked:
+        raise HTTPException(status_code=423, detail="El dispositivo Kiosk está bloqueado por seguridad")
+
+
+def lock_kiosk_device(db: Session, reason: str, auth_type: str, session_id: Optional[str] = None) -> KioskLock:
+    lock = kiosk_state_for_update(db)
+    if lock.isLocked and lock.incidentId and db.get(SecurityIncident, lock.incidentId):
+        return lock
+    now = getUtcNow()
+    incident = SecurityIncident(
+        id=str(uuid.uuid4()), deviceId=DEFAULT_KIOSK_DEVICE_ID, timestamp=now,
+        authType=auth_type, eventType="MAX_ATTEMPTS_EXCEEDED" if session_id else "SECURITY_ALERT",
+        userRef=session_id, status="PHOTO_PENDING" if session_id else "OPEN", details=reason,
+    )
+    db.add(incident)
+    lock.isLocked = True
+    lock.lockedAt = now
+    lock.reason = reason
+    lock.lockedByAttemptType = auth_type
+    lock.incidentId = incident.id
+    lock.unlockedAt = None
+    lock.unlockedByCardUid = None
+    db.exec(update(VoteSession).where(col(VoteSession.isClosed).is_(False)).values(isClosed=True))
+    db.exec(update(FingerprintCommand).where(col(FingerprintCommand.status) == "pending")
+            .values(status="cancelled", completedAt=now))
+    return lock
+
+
 def buildSessionStatus(db: Session, voteSession: VoteSession) -> dict:
     fingerprintAttempts = getFingerprintAttemptCount(db, voteSession.id)
     fingerprintLocked = fingerprintAttempts >= MAX_FINGERPRINT_ATTEMPTS and not voteSession.fingerprintOk
     effectiveFaceOk = voteSession.faceOk or not REQUIRE_FACE
-    isReady = voteSession.cardOk and voteSession.fingerprintOk and effectiveFaceOk
+    kioskLocked = is_kiosk_locked(db)
+    isReady = voteSession.cardOk and voteSession.fingerprintOk and effectiveFaceOk and not kioskLocked
     return {
         "sessionId": voteSession.id,
         "cardOk": voteSession.cardOk,
@@ -397,12 +538,15 @@ def buildSessionStatus(db: Session, voteSession: VoteSession) -> dict:
         "faceRequired": REQUIRE_FACE,
         "faceAttempts": voteSession.faceAttempts,
         "maxFaceAttempts": MAX_FACE_ATTEMPTS,
+        "faceAttemptsRemaining": max(0, MAX_FACE_ATTEMPTS - voteSession.faceAttempts),
         "faceLocked": voteSession.faceAttempts >= MAX_FACE_ATTEMPTS and not effectiveFaceOk,
         "readyToVote": isReady,
         "fingerprintAttempts": fingerprintAttempts,
         "maxFingerprintAttempts": MAX_FINGERPRINT_ATTEMPTS,
+        "fingerprintAttemptsRemaining": max(0, MAX_FINGERPRINT_ATTEMPTS - fingerprintAttempts),
         "fingerprintLocked": fingerprintLocked,
         "fingerprintCommandPending": hasPendingFingerprintCommand(db, voteSession.id),
+        "kioskLocked": kioskLocked,
     }
 
 
@@ -478,6 +622,7 @@ def createCandidate(request: CandidateRequest, db: Session = Depends(getDbSessio
     stateName, municipalityName = buildCandidateRegion(request)
     candidate = Candidate(
         name=request.name,
+        party=request.party,
         office=request.office,
         stateName=stateName,
         municipalityName=municipalityName,
@@ -487,6 +632,7 @@ def createCandidate(request: CandidateRequest, db: Session = Depends(getDbSessio
     return {
         "candidateId": candidate.id,
         "name": candidate.name,
+        "party": candidate.party,
         "office": candidate.office,
         "stateName": candidate.stateName,
         "municipalityName": candidate.municipalityName,
@@ -503,6 +649,7 @@ def listCandidates(office: Optional[str] = None, db: Session = Depends(getDbSess
         {
             "candidateId": candidate.id,
             "name": candidate.name,
+            "party": candidate.party,
             "office": candidate.office,
             "stateName": candidate.stateName,
             "municipalityName": candidate.municipalityName,
@@ -513,6 +660,7 @@ def listCandidates(office: Optional[str] = None, db: Session = Depends(getDbSess
 
 @app.post("/api/v1/session/start", dependencies=[Depends(verifyDeviceKey)])
 def startSession(request: StartSessionRequest, db: Session = Depends(getDbSession)):
+    require_kiosk_available(db)
     voter = db.exec(select(Voter).where(Voter.cardUid == normalizeCardUid(request.cardUid))).first()
     if voter is None:
         raise HTTPException(status_code=404, detail="Tarjeta no registrada")
@@ -528,9 +676,10 @@ def startSession(request: StartSessionRequest, db: Session = Depends(getDbSessio
 
 @app.post("/api/v1/session/{sessionId}/fingerprint-command", dependencies=[Depends(verifyDeviceKey)])
 def requestFingerprintCommand(sessionId: str, db: Session = Depends(getDbSession)):
+    require_kiosk_available(db)
     voteSession = getActiveSession(db, sessionId)
     expireFingerprintCommands(db, sessionId)
-    db.commit()
+    db.flush()
     sessionStatus = buildSessionStatus(db, voteSession)
     if voteSession.fingerprintOk:
         raise HTTPException(status_code=409, detail="La huella ya fue verificada")
@@ -550,15 +699,16 @@ def requestFingerprintCommand(sessionId: str, db: Session = Depends(getDbSession
             createdAt=getUtcNow(),
         )
         db.add(command)
-        db.commit()
-        db.refresh(command)
+    db.commit()
     return buildCommandResponse(db, command)
 
 
 @app.get("/api/v1/device/fingerprint-command/pending", dependencies=[Depends(verifyFingerprintDevice)])
 def getPendingFingerprintCommand(request: Request, db: Session = Depends(getDbSession)):
+    if kiosk_state_for_update(db).isLocked:
+        return signedDeviceResponse(request, {"active": False, "command": None})
     expireFingerprintCommands(db)
-    db.commit()
+    db.flush()
     query = select(FingerprintCommand).where(col(FingerprintCommand.status) == "pending")
     query = query.order_by(col(FingerprintCommand.createdAt))
     commands = db.exec(query).all()
@@ -574,20 +724,23 @@ def getPendingFingerprintCommand(request: Request, db: Session = Depends(getDbSe
             command.status = "cancelled"
             command.completedAt = getUtcNow()
             db.add(command)
-            db.commit()
+            db.flush()
             continue
+        db.commit()
         return signedDeviceResponse(request, {
             "active": True,
             "commandId": command.id,
             "sessionId": command.sessionId,
             "commandTimeoutSeconds": FINGERPRINT_COMMAND_TIMEOUT_SECONDS,
         })
+    db.commit()
     return signedDeviceResponse(request, {"active": False, "command": None})
 
 
 @app.post("/api/v1/session/{sessionId}/fingerprint", dependencies=[Depends(verifyFingerprintDevice)])
 def verifyFingerprint(sessionId: str, fingerprintRequest: FingerprintRequest,
                       request: Request, db: Session = Depends(getDbSession)):
+    require_kiosk_available(db)
     if fingerprintRequest.fingerprintSlot < 0:
         raise HTTPException(status_code=422, detail="fingerprintSlot no puede ser negativo")
     commandQuery = select(FingerprintCommand).where(
@@ -641,7 +794,11 @@ def verifyFingerprint(sessionId: str, fingerprintRequest: FingerprintRequest,
         db.add(voteSession)
         invalidatePendingFingerprintCommands(db, sessionId)
     elif previousAttempts + 1 >= MAX_FINGERPRINT_ATTEMPTS:
-        invalidatePendingFingerprintCommands(db, sessionId)
+        lock_kiosk_device(
+            db,
+            reason="Se agotaron los intentos de huella dactilar",
+            auth_type="FINGERPRINT", session_id=sessionId,
+        )
     db.commit()
 
     if not isMatch:
@@ -655,6 +812,7 @@ def verifyFingerprint(sessionId: str, fingerprintRequest: FingerprintRequest,
 
 @app.get("/api/v1/session/{sessionId}/face-challenge", dependencies=[Depends(verifyDeviceKey)])
 def getFaceChallenge(sessionId: str, db: Session = Depends(getDbSession)):
+    require_kiosk_available(db)
     if not REQUIRE_FACE:
         raise HTTPException(status_code=409, detail="La verificacion facial esta deshabilitada")
     voteSession = getActiveSession(db, sessionId)
@@ -679,6 +837,7 @@ def getFaceChallenge(sessionId: str, db: Session = Depends(getDbSession)):
 
 @app.post("/api/v1/session/{sessionId}/face", dependencies=[Depends(verifyDeviceKey)])
 def verifyFace(sessionId: str, request: FaceVerificationRequest, db: Session = Depends(getDbSession)):
+    require_kiosk_available(db)
     if not REQUIRE_FACE:
         raise HTTPException(status_code=409, detail="La verificacion facial esta deshabilitada")
     voteSession = getActiveSession(db, sessionId)
@@ -707,8 +866,14 @@ def verifyFace(sessionId: str, request: FaceVerificationRequest, db: Session = D
         db.rollback()
         raise HTTPException(status_code=409, detail="El desafio facial ya fue utilizado")
     if not isValidMatch:
-        db.commit()
         attempts = previousAttempts + 1
+        if attempts >= MAX_FACE_ATTEMPTS:
+            lock_kiosk_device(
+                db,
+                reason="Se agotaron los intentos de reconocimiento facial",
+                auth_type="FACE", session_id=sessionId,
+            )
+        db.commit()
         detail = f"Rostro no verificado. Intento {attempts} de {MAX_FACE_ATTEMPTS}"
         if attempts >= MAX_FACE_ATTEMPTS:
             detail += "; verificacion bloqueada"
@@ -721,6 +886,8 @@ def verifyFace(sessionId: str, request: FaceVerificationRequest, db: Session = D
 
 @app.get("/api/v1/session/active", dependencies=[Depends(verifyDeviceKey)])
 def getCurrentSession(db: Session = Depends(getDbSession)):
+    if is_kiosk_locked(db):
+        return {"active": False, "kioskLocked": True}
     query = select(VoteSession).where(col(VoteSession.isClosed).is_(False))
     query = query.order_by(col(VoteSession.createdAt).desc()).limit(20)
     openSessions = db.exec(query).all()
@@ -739,6 +906,7 @@ def getCurrentSession(db: Session = Depends(getDbSession)):
 
 @app.get("/api/v1/session/{sessionId}", dependencies=[Depends(verifyDeviceKey)])
 def getSessionStatus(sessionId: str, db: Session = Depends(getDbSession)):
+    require_kiosk_available(db)
     voteSession = getActiveSession(db, sessionId)
     expireFingerprintCommands(db, sessionId)
     db.commit()
@@ -747,6 +915,7 @@ def getSessionStatus(sessionId: str, db: Session = Depends(getDbSession)):
 
 @app.post("/api/v1/session/{sessionId}/cancel", dependencies=[Depends(verifyDeviceKey)])
 def cancelSession(sessionId: str, db: Session = Depends(getDbSession)):
+    require_kiosk_available(db)
     voteSession = db.get(VoteSession, sessionId)
     if voteSession is None:
         raise HTTPException(status_code=404, detail="Sesion no encontrada")
@@ -761,6 +930,7 @@ def cancelSession(sessionId: str, db: Session = Depends(getDbSession)):
 
 @app.get("/api/v1/session/{sessionId}/ballot", dependencies=[Depends(verifyDeviceKey)])
 def getBallot(sessionId: str, db: Session = Depends(getDbSession)):
+    require_kiosk_available(db)
     voteSession = getActiveSession(db, sessionId)
     sessionStatus = buildSessionStatus(db, voteSession)
     if not sessionStatus["readyToVote"]:
@@ -770,7 +940,7 @@ def getBallot(sessionId: str, db: Session = Depends(getDbSession)):
     offices = []
     for office in OFFICE_ORDER:
         officeCandidates = [
-            {"candidateId": candidate.id, "name": candidate.name}
+            {"candidateId": candidate.id, "name": candidate.name, "party": candidate.party}
             for candidate in candidates
             if candidate.office == office and candidateMatchesVoter(candidate, voter)
         ]
@@ -785,6 +955,7 @@ def getBallot(sessionId: str, db: Session = Depends(getDbSession)):
 
 @app.post("/api/v1/session/{sessionId}/vote", dependencies=[Depends(verifyDeviceKey)])
 def castVote(sessionId: str, request: VoteRequest, db: Session = Depends(getDbSession)):
+    require_kiosk_available(db)
     voteSession = getActiveSession(db, sessionId)
     sessionStatus = buildSessionStatus(db, voteSession)
     if not sessionStatus["readyToVote"]:
@@ -823,6 +994,7 @@ def getResults(office: Optional[str] = None, db: Session = Depends(getDbSession)
     query = select(
         Candidate.id,
         Candidate.name,
+        Candidate.party,
         Candidate.office,
         Candidate.stateName,
         Candidate.municipalityName,
@@ -834,6 +1006,7 @@ def getResults(office: Optional[str] = None, db: Session = Depends(getDbSession)
     query = query.group_by(
         Candidate.id,
         Candidate.name,
+        Candidate.party,
         Candidate.office,
         Candidate.stateName,
         Candidate.municipalityName,
@@ -844,10 +1017,11 @@ def getResults(office: Optional[str] = None, db: Session = Depends(getDbSession)
         {
             "candidateId": row[0],
             "name": row[1],
-            "office": row[2],
-            "stateName": row[3],
-            "municipalityName": row[4],
-            "votes": row[5],
+            "party": row[2],
+            "office": row[3],
+            "stateName": row[4],
+            "municipalityName": row[5],
+            "votes": row[6],
         }
         for row in resultRows
     ]
@@ -928,3 +1102,210 @@ def getAnalytics(db: Session = Depends(getDbSession)):
         "failedFingerprintAttempts": failedAttempts,
         "auditFlags": auditFlags
     }
+
+
+# ==============================================================================
+# SEGURIDAD INTEGRAL DEL KIOSK: BLOQUEO GLOBAL, DESBLOQUEO ADMIN E INCIDENTES
+# ==============================================================================
+
+@app.get("/api/v1/kiosk/lock", dependencies=[Depends(verifyDeviceKey)])
+def getKioskLockStatus(db: Session = Depends(getDbSession)):
+    lock = db.get(KioskLock, DEFAULT_KIOSK_DEVICE_ID)
+    incident = db.get(SecurityIncident, lock.incidentId) if lock and lock.incidentId else None
+    if lock and lock.isLocked and incident is None:
+        lock = kiosk_state_for_update(db)
+        if lock.isLocked:
+            lock = lock_kiosk_device(db, lock.reason or "Bloqueo anterior", lock.lockedByAttemptType or "MANUAL")
+            db.flush()
+            incident = db.get(SecurityIncident, lock.incidentId)
+        db.commit()
+    return {
+        "deviceId": DEFAULT_KIOSK_DEVICE_ID,
+        "isLocked": bool(lock and lock.isLocked),
+        "reason": lock.reason if lock else None,
+        "lockedAt": toUtcAware(lock.lockedAt).isoformat() if lock and lock.lockedAt else None,
+        "lockedByAttemptType": lock.lockedByAttemptType if lock else None,
+        "incidentId": incident.id if incident else None,
+        "photoStatus": incident.status if incident else None,
+    }
+
+
+@app.post("/api/v1/kiosk/lock", dependencies=[Depends(verifyDeviceKey)])
+def setKioskLock(lockRequest: LockKioskRequest, db: Session = Depends(getDbSession)):
+    lock = lock_kiosk_device(db, lockRequest.reason, "MANUAL")
+    db.commit()
+    return {"success": True, "deviceId": lock.deviceId, "isLocked": True, "incidentId": lock.incidentId}
+
+
+@app.post("/api/v1/kiosk/unlock", dependencies=[Depends(verifyDeviceKey)])
+def unlockKiosk(unlockRequest: UnlockKioskRequest, db: Session = Depends(getDbSession)):
+    scan = unlockRequest.scan
+    lock = kiosk_state_for_update(db)
+    now = getUtcNow()
+    # The signed scan is bound to the specific lock and is accepted only while fresh.
+    if (
+        scan.deviceId != NFC_DEVICE_ID or scan.sessionId != lock.incidentId
+        or not int(now.timestamp()) <= scan.expiresAt <= int(now.timestamp()) + DEVICE_MAX_SKEW_SECONDS
+    ):
+        raise HTTPException(status_code=403, detail="Lectura administrativa inválida o vencida")
+    expected = nfc_response_signature(
+        load_hex_key("NFC_HMAC_KEY"), scan.deviceId, scan.sessionId, scan.nonce,
+        scan.sequence, scan.status, scan.uid, scan.expiresAt,
+    )
+    if not signature_matches(scan.hmac, expected):
+        raise HTTPException(status_code=403, detail="Firma del lector NFC inválida")
+    nonce_key = (f"admin:{scan.deviceId}", scan.nonce)
+    if db.get(DeviceNonce, nonce_key):
+        audit = db.get(KioskUnlockAudit, scan.sessionId)
+        if audit and audit.scanNonce == scan.nonce and not lock.isLocked:
+            return {"success": True, "adminName": audit.adminName, "isLocked": False}
+        raise HTTPException(status_code=409, detail="Lectura administrativa ya utilizada")
+    if not lock.isLocked:
+        raise HTTPException(status_code=409, detail="El dispositivo ya está desbloqueado")
+    db.add(DeviceNonce(deviceId=nonce_key[0], nonce=nonce_key[1], createdAt=now))
+    admin_card = db.exec(select(AdminCard).where(
+        AdminCard.cardUid == scan.uid, col(AdminCard.isEnabled).is_(True),
+    )).first()
+    if admin_card is None:
+        db.commit()
+        raise HTTPException(status_code=403, detail="Tarjeta de administrador no autorizada o deshabilitada")
+    db.add(KioskUnlockAudit(
+        incidentId=scan.sessionId, adminCardId=admin_card.id, adminName=admin_card.adminName, scanNonce=scan.nonce, unlockedAt=now,
+    ))
+    incident = db.get(SecurityIncident, lock.incidentId)
+    if incident and incident.status == "PHOTO_PENDING":
+        incident.status = "PHOTO_UNAVAILABLE"
+    lock.isLocked = False
+    lock.unlockedAt = now
+    lock.unlockedByCardUid = scan.uid
+    db.commit()
+    return {"success": True, "adminName": admin_card.adminName, "isLocked": False}
+
+
+def photo_cutoff() -> datetime:
+    return getUtcNow() - timedelta(days=INCIDENT_PHOTO_RETENTION_DAYS)
+
+
+@app.post("/api/v1/security/incidents", dependencies=[Depends(verifyDeviceKey)])
+def reportSecurityIncident(incidentRequest: IncidentReportRequest, db: Session = Depends(getDbSession)):
+    lock = kiosk_state_for_update(db)
+    incident = db.get(SecurityIncident, str(incidentRequest.id))
+    if incident is None or incident.deviceId != DEFAULT_KIOSK_DEVICE_ID or incident.eventType != "MAX_ATTEMPTS_EXCEEDED":
+        raise HTTPException(status_code=404, detail="Incidente no encontrado")
+    if toUtcAware(incident.timestamp) <= photo_cutoff():
+        raise HTTPException(status_code=410, detail="Venció el plazo de conservación de evidencia")
+    if incident.status == "PHOTO_PENDING":
+        if not lock.isLocked or lock.incidentId != incident.id:
+            raise HTTPException(status_code=409, detail="El incidente ya no está activo")
+        if incidentRequest.photoBase64 and not incidentRequest.captureFailed:
+            try:
+                jpeg = base64.b64decode(incidentRequest.photoBase64, validate=True)
+                if len(jpeg) > MAX_PHOTO_BYTES:
+                    raise ValueError("JPEG demasiado grande")
+                with Image.open(io.BytesIO(jpeg), formats=["JPEG"]) as image:
+                    if image.width * image.height > 8_000_000:
+                        raise ValueError("Resolución excesiva")
+                    image.load()
+            except (ValueError, binascii.Error, UnidentifiedImageError, OSError, Image.DecompressionBombError) as exc:
+                raise HTTPException(status_code=422, detail="Evidencia JPEG inválida") from exc
+            db.add(IncidentPhoto(incidentId=incident.id, jpeg=jpeg, capturedAt=getUtcNow()))
+            incident.status = "PHOTO_STORED"
+        elif incidentRequest.captureFailed and not incidentRequest.photoBase64:
+            incident.status = "CAMERA_ERROR"
+        else:
+            raise HTTPException(status_code=422, detail="Indica una foto o un fallo de captura")
+    photo = db.get(IncidentPhoto, incident.id) if incident.status == "PHOTO_STORED" else None
+    response = {"success": True, "incidentId": incident.id, "status": incident.status,
+                "hasPhoto": bool(photo and toUtcAware(photo.capturedAt) > photo_cutoff()), "kioskLocked": lock.isLocked}
+    db.commit()
+    return response
+
+
+@app.get("/api/v1/security/incidents", dependencies=[Depends(verifyAdminKey)])
+def listSecurityIncidents(db: Session = Depends(getDbSession)):
+    photo_ids = set(db.exec(select(IncidentPhoto.incidentId).where(IncidentPhoto.capturedAt > photo_cutoff())).all())
+    audits = {audit.incidentId: audit for audit in db.exec(select(KioskUnlockAudit)).all()}
+    incidents = db.exec(select(SecurityIncident).order_by(col(SecurityIncident.timestamp).desc())).all()
+    return [
+        {
+            "id": inc.id,
+            "deviceId": inc.deviceId,
+            "timestamp": toUtcAware(inc.timestamp).isoformat(),
+            "authType": inc.authType,
+            "eventType": inc.eventType,
+            "userRef": inc.userRef,
+            "hasPhoto": inc.id in photo_ids,
+            "unlockedBy": audits[inc.id].adminName if inc.id in audits else None,
+            "unlockedAt": toUtcAware(audits[inc.id].unlockedAt).isoformat() if inc.id in audits else None,
+            "status": inc.status,
+            "details": inc.details,
+        }
+        for inc in incidents
+    ]
+
+
+@app.get("/api/v1/security/incidents/{incidentId}/photo", dependencies=[Depends(verifyAdminKey)])
+def getSecurityIncidentPhoto(incidentId: str, db: Session = Depends(getDbSession)):
+    photo = db.get(IncidentPhoto, incidentId)
+    if photo is None or toUtcAware(photo.capturedAt) <= photo_cutoff():
+        raise HTTPException(status_code=404, detail="Fotografía de incidente no encontrada")
+    return Response(photo.jpeg, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
+
+
+@app.delete("/api/v1/security/incidents/expired-photos", dependencies=[Depends(verifyAdminKey)])
+def purgeExpiredPhotos(db: Session = Depends(getDbSession)):
+    deleted = db.exec(delete(IncidentPhoto).where(IncidentPhoto.capturedAt <= photo_cutoff()))
+    count = deleted.rowcount
+    db.commit()
+    return {"deleted": count}
+
+
+@app.post("/api/v1/admin/cards", dependencies=[Depends(verifyAdminKey)])
+def enrollAdminCard(req: AdminCardEnrollRequest, db: Session = Depends(getDbSession)):
+    normalized_uid = normalizeCardUid(req.cardUid)
+    if not re.fullmatch(r"[0-9A-F]{8,20}", normalized_uid):
+        raise HTTPException(status_code=422, detail="UID NFC inválido")
+    existing = db.exec(select(AdminCard).where(AdminCard.cardUid == normalized_uid)).first()
+    if existing:
+        existing.adminName = req.adminName.strip()
+        existing.isEnabled = req.isEnabled
+        existing.updatedAt = getUtcNow()
+        db.add(existing)
+        db.commit()
+        db.refresh(existing)
+        return {"success": True, "message": "Tarjeta de administrador actualizada", "id": existing.id}
+    admin = AdminCard(
+        cardUid=normalized_uid,
+        adminName=req.adminName.strip(),
+        isEnabled=req.isEnabled,
+        createdAt=getUtcNow(),
+    )
+    db.add(admin)
+    db.commit()
+    db.refresh(admin)
+    return {"success": True, "message": "Tarjeta de administrador enrolada", "id": admin.id}
+
+
+@app.get("/api/v1/admin/cards", dependencies=[Depends(verifyAdminKey)])
+def listAdminCards(db: Session = Depends(getDbSession)):
+    cards = db.exec(select(AdminCard).order_by(col(AdminCard.createdAt).desc())).all()
+    return [
+        {
+            "id": c.id,
+            "cardUid": c.cardUid,
+            "adminName": c.adminName,
+            "isEnabled": c.isEnabled,
+            "createdAt": toUtcAware(c.createdAt).isoformat(),
+        }
+        for c in cards
+    ]
+
+
+# --- Dashboard web (modulo aditivo; ver docs/DASHBOARD_MANUAL.md) ---
+from dashboard_api import BackendBindings, install_dashboard  # noqa: E402
+
+install_dashboard(app, BackendBindings(
+    engine=engine, verify_device_key=verifyDeviceKey, device_key=DEVICE_KEY,
+    Voter=Voter, Candidate=Candidate, Ballot=Ballot, DeviceReplayGuard=DeviceReplayGuard,
+    fingerprint_device_id=FINGERPRINT_DEVICE_ID, normalize_region=normalizeRegionName,
+))

@@ -3,7 +3,6 @@ from __future__ import annotations
 # En kiosk_ui/adapters/real/nfc.py
 from kiosk_ui.led_control import encender_tarjeta
 
-import logging
 import os
 import re
 import secrets
@@ -21,7 +20,6 @@ from kiosk_ui.core.models import StepResult
 from kiosk_ui.adapters.real.api_client import ApiError, VotingApi
 
 _UID_RE = re.compile(r"^[0-9A-F]{8,20}$")
-log = logging.getLogger(__name__)
 
 
 class NfcCardReader:
@@ -43,64 +41,77 @@ class NfcCardReader:
         self.read_timeout = float(os.getenv("NFC_READ_TIMEOUT_SECONDS", "35"))
         self.command_ttl = int(os.getenv("NFC_COMMAND_TTL_SECONDS", "30"))
         self._http = requests.Session()
+        self._io_lock = threading.Lock()
 
     def wait_for_card(self, cancel: threading.Event) -> StepResult:
-        if cancel.is_set():
-            return StepResult(False, "Operación cancelada.")
-        session_id = str(uuid.uuid4())
-        nonce = secrets.token_hex(16)
-        sequence = time.time_ns() // 1_000_000
-        expires_at = int(time.time()) + self.command_ttl
-        payload = {
-            "deviceId": self.device_id, "sessionId": session_id, "action": "scan",
-            "nonce": nonce, "sequence": sequence, "expiresAt": expires_at,
-        }
-        payload["hmac"] = nfc_command_signature(
-            self.key, self.device_id, session_id, "scan", nonce, sequence, expires_at
-        )
         try:
-            response = self._http.post(
-                self.base_url + "/v1/nfc/scan", json=payload,
-                timeout=(self.connect_timeout, self.read_timeout),
-            )
-            data = response.json()
-        except (requests.RequestException, ValueError) as exc:
-            log.warning("NFC comunicacion fallo: %r", exc)
-            return StepResult(False, "No se pudo comunicar con el lector NFC. Solicite ayuda.")
-        log.warning("NFC http=%s status=%s detail=%s", response.status_code,
-                    data.get("status") if isinstance(data, dict) else None,
-                    data.get("detail") if isinstance(data, dict) else None)
-        if cancel.is_set():
-            return StepResult(False, "Operación cancelada.")
-        if response.status_code != 200 or not isinstance(data, dict):
-            return StepResult(False, "El lector NFC rechazó la orden. Solicite ayuda.")
-        if not self._valid_response(data, session_id, nonce, sequence):
-            log.warning("NFC respuesta no valida: deviceId=%r sessionOk=%s nonceOk=%s seqOk=%s expiresAt=%r ahora=%s",
-                        data.get("deviceId"), data.get("sessionId") == session_id,
-                        data.get("nonce") == nonce, data.get("sequence") == sequence,
-                        data.get("expiresAt"), int(time.time()))
-            return StepResult(False, "La respuesta del lector NFC no es auténtica. Operación detenida.")
-        status = data.get("status")
-        if status == "timeout":
-            return StepResult(False, "No se detectó una tarjeta a tiempo. Intente de nuevo.")
-        if status != "ok":
-            return StepResult(False, "No se pudo leer la tarjeta. Intente de nuevo o solicite ayuda.")
-        uid = data.get("uid", "")
-        log.warning("NFC uid largo=%s", len(uid) if isinstance(uid, str) else None)
-        if not isinstance(uid, str) or not _UID_RE.fullmatch(uid):
-            return StepResult(False, "La lectura NFC está incompleta o es inválida.")
-        try:
-            backend_session = self.api.start_session(uid)
-            encender_tarjeta()
-            return StepResult(True, "Tarjeta validada", backend_session)
+            scan = self._scan(cancel, str(uuid.uuid4()))
+            if scan is None:
+                return StepResult(False, "No se detectó una tarjeta a tiempo. Intente de nuevo.")
+            backend_session = self.api.start_session(scan["uid"])
         except ApiError as exc:
-            log.warning("start_session fallo: status=%s msg=%s", exc.status_code, exc)
+            if exc.status_code == 423:
+                return StepResult(False, "El dispositivo está bloqueado por seguridad.", is_locked=True)
             if exc.status_code == 404:
                 return StepResult(False, "La tarjeta no está asociada a un votante habilitado.")
             if exc.status_code == 403:
                 return StepResult(False, "La tarjeta no permite iniciar una votación. Solicite ayuda.")
-            return StepResult(False, "No se pudo validar la tarjeta con el servicio local.")
+            return StepResult(False, str(exc))
+        encender_tarjeta()
         return StepResult(True, "Tarjeta validada", backend_session)
+
+    def read_admin_card(self, cancel: threading.Event, incident_id: str) -> Optional[dict]:
+        return self._scan(cancel, incident_id)
+
+    def probe_health(self) -> bool | None:
+        # El servidor del ESP32 atiende una petición a la vez.
+        if not self._io_lock.acquire(blocking=False):
+            return None
+        try:
+            response = self._http.get(
+                self.base_url + "/v1/nfc/health", timeout=(1, 3), allow_redirects=False,
+            )
+            if response.status_code == 404:  # firmware anterior a la consulta de estado
+                return None
+            return response.status_code == 200 and response.json() == {"status": "online"}
+        except (requests.RequestException, ValueError):
+            return False
+        finally:
+            self._io_lock.release()
+
+    def _scan(self, cancel: threading.Event, session_id: str) -> Optional[dict]:
+        with self._io_lock:
+            if cancel.is_set():
+                return None
+            nonce = secrets.token_hex(16)
+            sequence = time.time_ns() // 1_000_000
+            expires_at = int(time.time()) + self.command_ttl
+            payload = {
+                "deviceId": self.device_id, "sessionId": session_id, "action": "scan",
+                "nonce": nonce, "sequence": sequence, "expiresAt": expires_at,
+                "hmac": nfc_command_signature(
+                    self.key, self.device_id, session_id, "scan", nonce, sequence, expires_at,
+                ),
+            }
+            try:
+                response = self._http.post(
+                    self.base_url + "/v1/nfc/scan", json=payload,
+                    timeout=(self.connect_timeout, self.read_timeout),
+                )
+                data = response.json()
+            except (requests.RequestException, ValueError) as exc:
+                raise ApiError("No se pudo comunicar con el lector NFC. Solicite ayuda.") from exc
+        if cancel.is_set():
+            return None
+        if response.status_code != 200 or not isinstance(data, dict):
+            raise ApiError("El lector NFC rechazó la orden. Solicite ayuda.")
+        if not self._valid_response(data, session_id, nonce, sequence):
+            raise ApiError("La respuesta del lector NFC no es auténtica.")
+        if data["status"] == "timeout":
+            return None
+        if data["status"] != "ok" or not _UID_RE.fullmatch(data["uid"]):
+            raise ApiError("No se pudo leer una tarjeta NFC válida.")
+        return data
 
     def _valid_response(self, data: dict, session_id: str, nonce: str, sequence: int) -> bool:
         uid = data.get("uid", "")

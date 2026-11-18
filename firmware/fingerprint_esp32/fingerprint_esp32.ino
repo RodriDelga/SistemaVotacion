@@ -7,7 +7,7 @@
 //   Sensor TX -> ESP32 GPIO16 (RX2)
 //   Sensor RX -> ESP32 GPIO17 (TX2)
 //   Sensor VCC -> la alimentacion indicada por tu modelo; GND -> GND comun.
-//   Revisa la hoja de datos: no todos los modelos admiten 3V3 ni tienen los mismos colores.
+//   Buzzer (+) -> ESP32 GPIO4; Buzzer (-) -> GND comun.
 
 #include <Adafruit_Fingerprint.h>
 #include <WiFi.h>
@@ -21,6 +21,45 @@
 const int SENSOR_RX_PIN = 16;
 const int SENSOR_TX_PIN = 17;
 const uint32_t SENSOR_BAUD_RATE = 57600;
+
+// Buzzer de 2 patas en lado VIN (GPIO 4)
+const int BUZZER_PIN = 4;
+
+// Buzzer ACTIVO (oscilador interno): suena mientras el pin este en HIGH.
+// No se le debe mandar una onda rapida; solo nivel fijo durante la duracion.
+void buzzerBeep(int durationMs) {
+    digitalWrite(BUZZER_PIN, HIGH);
+    delay(durationMs);
+    digitalWrite(BUZZER_PIN, LOW);
+}
+
+void buzzerInit() {
+    pinMode(BUZZER_PIN, OUTPUT);
+    digitalWrite(BUZZER_PIN, LOW);
+    // Beep corto de inicio (60 ms) para comprobar que el buzzer funciona fisicamente
+    buzzerBeep(60);
+}
+
+void buzzerOrderReceived() {
+    // Un pitido corto al pedir el dedo
+    buzzerBeep(100);
+}
+
+void buzzerSuccess() {
+    // Doble pitido de confirmacion
+    buzzerBeep(80);
+    delay(60);
+    buzzerBeep(120);
+}
+
+void buzzerError() {
+    // Tres pitidos cortos = error / huella no coincide
+    for (int i = 0; i < 3; i++) {
+        buzzerBeep(100);
+        delay(80);
+    }
+}
+
 const unsigned long WIFI_TIMEOUT_MS = 15000;
 const unsigned long FINGER_WAIT_MS = 10000;
 const int HTTP_TIMEOUT_MS = 5000;
@@ -142,11 +181,12 @@ bool readJsonBool(const String& json, const char* key) {
 // ---------- HMAC-SHA256, nonce, secuencia persistente y respuestas ----------
 
 String bytesToHex(const uint8_t* bytes, size_t length) {
-  static const char HEX[] = "0123456789abcdef";
+  static const char hexChars[] = "0123456789abcdef";
   String result;
+  result.reserve(length * 2);
   for (size_t i = 0; i < length; i++) {
-    result += HEX[bytes[i] >> 4];
-    result += HEX[bytes[i] & 15];
+    result += hexChars[bytes[i] >> 4];
+    result += hexChars[bytes[i] & 15];
   }
   return result;
 }
@@ -177,7 +217,17 @@ String hmacSha256(const String& message) {
 
 String sha256Hex(const String& body) {
   uint8_t output[32];
-  mbedtls_sha256_ret((const uint8_t*)body.c_str(), body.length(), output, 0);
+  const mbedtls_md_info_t* mdInfo = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
+  if (mdInfo == NULL) return "";
+  
+  mbedtls_md_context_t ctx;
+  mbedtls_md_init(&ctx);
+  mbedtls_md_setup(&ctx, mdInfo, 0);
+  mbedtls_md_starts(&ctx);
+  mbedtls_md_update(&ctx, (const uint8_t*)body.c_str(), body.length());
+  mbedtls_md_finish(&ctx, output);
+  mbedtls_md_free(&ctx);
+
   return bytesToHex(output, sizeof(output));
 }
 
@@ -337,39 +387,52 @@ bool checkApi() {
 
 void enrollFinger(int slot) {
     Serial.println("Pon el dedo...");
+    buzzerOrderReceived();
     if (!captureToBuffer(1)) {
+        buzzerError();
         return;
     }
+    buzzerBeep(60);
     Serial.println("Quita el dedo.");
     delay(1000);
     if (!waitForFinger(false, FINGER_WAIT_MS)) {
+        buzzerError();
         return;
     }
     Serial.println("Pon el MISMO dedo otra vez...");
+    buzzerOrderReceived();
     if (!captureToBuffer(2)) {
+        buzzerError();
         return;
     }
     if (finger.createModel() != FINGERPRINT_OK) {
         Serial.println("Las dos lecturas no coinciden, intenta de nuevo.");
+        buzzerError();
         return;
     }
     if (finger.storeModel(slot) != FINGERPRINT_OK) {
         Serial.println("No se pudo guardar la huella en el sensor.");
+        buzzerError();
         return;
     }
+    buzzerSuccess();
     Serial.printf("Huella guardada en slot %d. Usalo como fingerprintSlot del votante.\n", slot);
 }
 
 int searchFinger() {
     Serial.println("Pon el dedo...");
+    buzzerOrderReceived();
     if (!captureToBuffer(1)) {
+        buzzerError();
         return 0;
     }
     uint8_t searchResult = finger.fingerSearch();
     if (searchResult == FINGERPRINT_OK) {
+        buzzerSuccess();
         Serial.printf("Huella reconocida: slot %d (confianza %d)\n", finger.fingerID, finger.confidence);
         return finger.fingerID;
     }
+    buzzerError();
     if (searchResult == FINGERPRINT_NOTFOUND) {
         Serial.println("Huella NO registrada en el sensor.");
     } else {
@@ -429,6 +492,7 @@ void serviceAutomaticFingerRead() {
     if (imageResult == FINGERPRINT_NOFINGER) {
         if (now - autoStartedAt >= FINGER_WAIT_MS) {
             Serial.println("No se detecto dedo antes del timeout; se reportara un intento fallido.");
+            buzzerError();
             queueAutomaticResult(0);
         }
         return;
@@ -436,6 +500,7 @@ void serviceAutomaticFingerRead() {
     if (imageResult != FINGERPRINT_OK) {
         Serial.printf("Error de captura 0x%02X; se reintentara hasta el timeout.\n", imageResult);
         if (now - autoStartedAt >= FINGER_WAIT_MS) {
+            buzzerError();
             queueAutomaticResult(0);
         }
         return;
@@ -444,6 +509,7 @@ void serviceAutomaticFingerRead() {
     uint8_t convertResult = finger.image2Tz(1);
     if (convertResult != FINGERPRINT_OK) {
         Serial.printf("No se pudo convertir la imagen (0x%02X).\n", convertResult);
+        buzzerError();
         queueAutomaticResult(0);
         return;
     }
@@ -458,6 +524,7 @@ void serviceAutomaticFingerRead() {
         } else {
             Serial.printf("Error de busqueda 0x%02X.\n", searchResult);
         }
+        buzzerError();
         queueAutomaticResult(0);
     }
 }
@@ -479,11 +546,13 @@ void serviceAutomaticResultDelivery() {
 
     if (statusCode == 200) {
         Serial.println("API: huella VERIFICADA para el votante de la sesion.");
+        buzzerSuccess(); // Sonido de confirmacion al verificar la huella
         finishAutomaticDelivery();
         return;
     }
     if (statusCode == 401 && responseBody.indexOf("Huella no coincide") >= 0) {
         Serial.println("API: intento fallido registrado. Espera otra orden si quedan intentos.");
+        buzzerError();
         finishAutomaticDelivery();
         return;
     }
@@ -492,7 +561,7 @@ void serviceAutomaticResultDelivery() {
         finishAutomaticDelivery();
         return;
     }
-    if (statusCode == 410 || statusCode == 404) {
+    if (statusCode == 410 || statusCode == 404 || statusCode == 423) {
         Serial.println("API: orden o sesion vencida/cancelada; se descarta el resultado tardio.");
         finishAutomaticDelivery();
         return;
@@ -543,6 +612,7 @@ void pollFingerprintCommand() {
     autoStartedAt = now;
     lastSensorQueryAt = now - SENSOR_QUERY_MS;
     autoState = AUTO_WAIT_FINGER;
+    buzzerOrderReceived();
     Serial.println("ORDEN RECIBIDA. Pon el dedo en el sensor ahora; tienes 10 segundos.");
 }
 
@@ -570,6 +640,7 @@ b -> buscar una huella (prueba local del sensor)
 i -> repetir el diagnostico
 d -> borrar un slot
 x -> borrar TODAS las huellas
+t -> probar el buzzer (orden, exito y error)
 La verificacion de votacion se activa automaticamente desde el frontend.
 ====================================)");
 }
@@ -579,7 +650,13 @@ void runDiagnostics() {
     bool isWifiOk = connectWifi();
     bool isApiOk = isWifiOk ? checkApi() : false;
     Serial.println();
-    Serial.println(sensorReady && isWifiOk && isApiOk ? "DIAGNOSTICO: todo en orden." : "DIAGNOSTICO: revisa los fallos anteriores.");
+    if (sensorReady && isWifiOk && isApiOk) {
+        Serial.println("DIAGNOSTICO: todo en orden.");
+        buzzerSuccess();
+    } else {
+        Serial.println("DIAGNOSTICO: revisa los fallos anteriores.");
+        buzzerError();
+    }
 }
 
 void handleSerialCommand() {
@@ -621,6 +698,14 @@ void handleSerialCommand() {
         } else {
             Serial.println("Cancelado.");
         }
+    } else if (command == 't') {
+        Serial.println("Probando buzzer (orden, exito y error)...");
+        buzzerOrderReceived();
+        delay(300);
+        buzzerSuccess();
+        delay(300);
+        buzzerError();
+        return;
     } else if (command == 'v') {
         Serial.println("El comando 'v' no es necesario: kiosk_ui crea la orden mediante la API.");
         return;
@@ -633,6 +718,7 @@ void handleSerialCommand() {
 void setup() {
     Serial.begin(115200);
     delay(1000);
+    buzzerInit();
     runDiagnostics();
     showMenu();
     lastCommandPollAt = millis() - COMMAND_POLL_MS;

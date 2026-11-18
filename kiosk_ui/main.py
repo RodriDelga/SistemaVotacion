@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import threading
 
 import customtkinter as ctk
 
@@ -38,7 +39,14 @@ def main(argv: list[str] | None = None) -> None:
     controller = VotingController(services)
     app = KioskApp(controller, demo=demo, fullscreen=args.fullscreen,
                    show_exit=args.show_exit or args.demo, inactivity_s=args.inactivity)
-    app.mainloop()
+    stop_heartbeat = threading.Event()
+    if services.run_heartbeat is not None:
+        threading.Thread(target=services.run_heartbeat, args=(stop_heartbeat,), daemon=True,
+                         name="kiosk-heartbeat").start()
+    try:
+        app.mainloop()
+    finally:
+        stop_heartbeat.set()
 
 
 if __name__ == "__main__":

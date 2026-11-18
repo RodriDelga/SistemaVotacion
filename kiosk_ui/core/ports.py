@@ -9,7 +9,7 @@ hilos trabajadores. Los que esperan al usuario reciben un threading.Event
 from __future__ import annotations
 
 import threading
-from typing import Mapping, Protocol, Sequence
+from typing import Mapping, Optional, Protocol, Sequence
 
 from kiosk_ui.core.models import Position, StepResult, SubmitResult
 
@@ -17,6 +17,9 @@ from kiosk_ui.core.models import Position, StepResult, SubmitResult
 class CardReader(Protocol):
     def wait_for_card(self, cancel: threading.Event) -> StepResult:
         """Espera una tarjeta y la valida. Devuelve voter_ref si es válida."""
+
+    def read_admin_card(self, cancel: threading.Event, incident_id: str) -> Optional[dict]:
+        """Devuelve la lectura NFC autenticada y vinculada al incidente."""
 
 
 class FingerprintVerifier(Protocol):
@@ -32,12 +35,16 @@ class VotingBackend(Protocol):
         """Devuelve los cargos y candidatos. Lanza una excepción si falla."""
 
     def submit_vote(self, voter_ref: str, selections: Mapping[str, str]) -> SubmitResult:
-        """Envía {position_id: candidate_id}. La respuesta debe reflejar al
-        backend real; ante cualquier duda debe devolver/lanzar algo que el
-        controlador trate como UNCERTAIN."""
+        """Envía {position_id: candidate_id}."""
 
     def cancel_session(self, voter_ref: str) -> None:
         """Cancela la sesión del backend al abandonar el flujo."""
+
+    def check_lock(self) -> dict: ...
+
+    def unlock_device(self, scan: dict) -> dict: ...
+
+    def report_incident(self, incident_id: str, photo_bytes: Optional[bytes]) -> dict: ...
 
 
 class DemoHooks(Protocol):

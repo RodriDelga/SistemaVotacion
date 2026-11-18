@@ -44,8 +44,8 @@ Consulte `docs/RASPBERRY_PI.md` antes del despliegue. El modo real exige disposi
 ## Pruebas
 
 ```bash
-python -m unittest discover -s tests -v
-python -m unittest kiosk_ui.tests.test_controller -v
+python -m pip install -r requirements-dev.txt
+python -m pytest -q tests kiosk_ui/tests
 ```
 
 La suite utiliza SQLite temporal, servidores simulados y datos sintéticos. No necesita ni modifica Neon. Los resultados y la matriz de pruebas físicas pendientes están en `docs/PRUEBAS.md`.
@@ -61,3 +61,7 @@ La suite utiliza SQLite temporal, servidores simulados y datos sintéticos. No n
 ## Alcance funcional importante
 
 El contrato recibido representa una **elección implícita** con tres cargos obligatorios. No existen tablas de elecciones ni historial por elección; no se han inventado. Una futura multi-elección requiere migración aditiva y pruebas específicas. La autenticación de tarjeta se basa en UID PN532 y no equivale a autenticación criptográfica de la tarjeta. El reconocimiento facial no incorpora detección de vida robusta. Estas limitaciones deben resolverse antes de considerar el sistema apto para una elección oficial.
+
+## Seguridad del Kiosk
+
+Consulte [Seguridad del Kiosk](docs/SEGURIDAD_KIOSK.md) para la actualización de base de datos, el alta de tarjetas NFC administrativas, el bloqueo persistente, la API de incidentes y la política de retención.

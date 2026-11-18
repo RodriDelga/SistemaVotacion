@@ -17,6 +17,7 @@ import logging
 import queue
 import threading
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 
 from kiosk_ui.core.models import (
@@ -43,6 +44,8 @@ class Services:
     fingerprint: FingerprintVerifier
     face: FaceVerifier
     backend: VotingBackend
+    capture_incident_photo: Callable[[], Optional[bytes]] = lambda: None
+    run_heartbeat: Optional[Callable[[threading.Event], None]] = None
 
 
 class VotingController:
@@ -60,6 +63,12 @@ class VotingController:
         self.steps: dict[Step, StepStatus] = {s: StepStatus.PENDING for s in Step}
         self.failed_step: Optional[Step] = None
         self.step_message = ""
+        self.attempts_remaining: dict[Step, Optional[int]] = {Step.FINGERPRINT: None, Step.FACE: None}
+        self.is_locked = False
+        self.lock_reason = ""
+        self.incident_id: Optional[str] = None
+        self.admin_unlock_message = ""
+        self.photo_status: Optional[str] = None
         self.ballot: tuple[Position, ...] = ()
         self.position_index = 0
         self.selections: dict[str, str] = {}   # selección temporal; NO es el voto registrado
@@ -137,7 +146,7 @@ class VotingController:
     # ----------------------------------------------------- inicio / reinicio
     def reset(self) -> None:
         """Descarta la sesión y vuelve a esperar tarjeta. Ignorado mientras se envía un voto."""
-        if self.phase is Phase.SUBMITTING:
+        if self.phase in (Phase.SUBMITTING, Phase.LOCKED):
             return
         apagar_todos()
         self._cancel.set()
@@ -146,12 +155,25 @@ class VotingController:
         self._cancel = threading.Event()
         self._init_state()
         self._notify()
-        cancel = self._cancel
-        self._spawn(lambda: self._svc.card_reader.wait_for_card(cancel), self._on_card)
+
+        self._spawn(self._svc.backend.check_lock, self._on_initial_lock_status)
+
+    def _on_initial_lock_status(self, result: Any) -> None:
+        if isinstance(result, dict) and result.get("isLocked") is True:
+            self._enter_locked(result)
+        elif isinstance(result, dict) and result.get("isLocked") is False:
+            cancel = self._cancel
+            self._spawn(lambda: self._svc.card_reader.wait_for_card(cancel), self._on_card)
+        else:
+            self.phase = Phase.AUTH
+            self._fail_step(Step.CARD, "No se pudo consultar el estado del Kiosk. Toque Reintentar.")
 
     # ------------------------------------------------------ autenticación
     def _on_card(self, result: Any) -> None:
         result = self._as_step_result(result, Step.CARD)
+        if result.is_locked:
+            self._enter_locked({"reason": result.message})
+            return
         self.phase = Phase.AUTH
         if result.ok and result.voter_ref:
             self._voter_ref = result.voter_ref
@@ -172,6 +194,10 @@ class VotingController:
     def _on_step(self, step: Step, result: Any) -> None:
         result = self._as_step_result(result, step)
         if not result.ok:
+            self.attempts_remaining[step] = result.attempts_remaining
+            if result.is_locked:
+                self._enter_locked({"reason": result.message})
+                return
             self._fail_step(step, result.message)
             return
         self.steps[step] = StepStatus.OK
@@ -180,6 +206,128 @@ class VotingController:
         else:
             self.phase = Phase.VERIFIED
             self._notify()
+
+    def _enter_locked(self, state: dict) -> None:
+        apagar_todos()
+        self.is_locked = True
+        self.phase = Phase.LOCKED
+        self.lock_reason = state.get("reason") or "Dispositivo bloqueado por seguridad."
+        self.incident_id = state.get("incidentId")
+        self.photo_status = state.get("photoStatus")
+        self._voter_ref = None
+        self.selections.clear()
+        self.ballot = ()
+        self._notify()
+        if self.incident_id:
+            self._process_locked_incident(state)
+        else:
+            self._refresh_locked_state()
+
+    def _refresh_locked_state(self, delay: float = 0) -> None:
+        cancel = self._cancel
+
+        def check() -> Any:
+            if not cancel.wait(delay):
+                return self._svc.backend.check_lock()
+
+        def done(state: Any) -> None:
+            if not isinstance(state, dict) or type(state.get("isLocked")) is not bool:
+                self.admin_unlock_message = "Sin comunicación con el backend. Verificando de nuevo…"
+                self._notify()
+                self._refresh_locked_state(2)
+            elif not state["isLocked"]:
+                self.phase = Phase.IDLE
+                self.reset()
+            elif not state.get("incidentId"):
+                self._refresh_locked_state(2)
+            else:
+                self.admin_unlock_message = ""
+                self._enter_locked(state)
+
+        self._spawn(check, done)
+
+    def _process_locked_incident(self, state: dict) -> None:
+        if self.photo_status != "PHOTO_PENDING":
+            self._start_admin_card_listener()
+            return
+        cancel = self._cancel
+        incident_id = state["incidentId"]
+
+        def report() -> dict:
+            # Mantiene el mismo resultado de captura durante todos los reintentos.
+            # Evita fotografiar a otra persona al recuperar un bloqueo anterior.
+            locked_at = datetime.fromisoformat(state["lockedAt"])
+            photo = None
+            if (datetime.now(timezone.utc) - locked_at).total_seconds() <= 30:
+                captured: queue.Queue = queue.Queue(maxsize=1)
+
+                def capture() -> None:
+                    try:
+                        captured.put(self._svc.capture_incident_photo())
+                    except Exception:
+                        captured.put(None)
+
+                threading.Thread(target=capture, daemon=True, name="kiosk-incident-camera").start()
+                try:
+                    photo = captured.get(timeout=8)
+                except queue.Empty:
+                    pass
+            last_error = None
+            for delay in (0, 1, 2):
+                if cancel.wait(delay):
+                    break
+                try:
+                    return self._svc.backend.report_incident(incident_id, photo)
+                except Exception as exc:
+                    last_error = exc
+                    if getattr(exc, "status_code", None) == 422 and photo is not None:
+                        photo = None
+            if last_error is not None:
+                raise last_error
+            return {}
+
+        def done(result: Any) -> None:
+            self.photo_status = result.get("status") if isinstance(result, dict) else "UPLOAD_ERROR"
+            self._notify()
+            self._start_admin_card_listener()
+
+        self._spawn(report, done)
+
+    def _start_admin_card_listener(self, delay: float = 0) -> None:
+        cancel = self._cancel
+        incident_id = self.incident_id
+
+        def listen() -> Any:
+            if cancel.wait(delay):
+                return None
+            scan = self._svc.card_reader.read_admin_card(cancel, incident_id)
+            if scan and not cancel.is_set():
+                return self._svc.backend.unlock_device(scan)
+            # Reconciliar también un desbloqueo cuya respuesta se perdió.
+            return self._svc.backend.check_lock()
+
+        def done(result: Any) -> None:
+            if isinstance(result, dict) and result.get("isLocked") is False:
+                self.is_locked = False
+                self.admin_unlock_message = "Administrador autorizado."
+                self._notify()
+                self._spawn(lambda: cancel.wait(1), lambda _: self._resume_unlocked())
+                return
+            if isinstance(result, dict) and result.get("incidentId") and result["incidentId"] != incident_id:
+                self._enter_locked(result)
+                return
+            if isinstance(result, PermissionError) or getattr(result, "status_code", None) == 403:
+                self.admin_unlock_message = "Tarjeta no autorizada. El dispositivo permanece bloqueado."
+            elif isinstance(result, Exception):
+                self.admin_unlock_message = "Error de comunicación o lectura. El dispositivo permanece bloqueado."
+            self._notify()
+            self._start_admin_card_listener(1)
+
+        self._spawn(listen, done)
+
+    def _resume_unlocked(self) -> None:
+        self.phase = Phase.IDLE
+        self.reset()
 
     def _fail_step(self, step: Step, message: str) -> None:
         apagar_todos()
@@ -215,6 +363,8 @@ class VotingController:
         self._spawn(lambda: self._svc.backend.load_ballot(ref), self._on_ballot)
 
     def _on_ballot(self, result: Any) -> None:
+        if getattr(result, "status_code", None) == 423:
+            return self._enter_locked({})
         if isinstance(result, Exception):
             return self._fail("No se pudo cargar la boleta. Avise al personal responsable.")
         ok = isinstance(result, tuple) and result and all(
@@ -283,6 +433,8 @@ class VotingController:
 
     def _on_submit(self, result: Any) -> None:
         apagar_todos()
+        if getattr(result, "status_code", None) == 423:
+            return self._enter_locked({})
         if not isinstance(result, SubmitResult):
             # Excepción o respuesta inesperada: no sabemos si el backend registró el voto.
             result = SubmitResult(SubmitOutcome.UNCERTAIN, "")

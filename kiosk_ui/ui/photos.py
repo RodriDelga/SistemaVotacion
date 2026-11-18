@@ -13,7 +13,7 @@ from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 from kiosk_ui.core.models import Candidate
 
-_PALETTE = ("#1F4E9C", "#2A6F97", "#3A5A9B", "#2F7F86", "#44639A")
+_PALETTE = ("#78909C",)
 _cache: dict[tuple, ctk.CTkImage] = {}
 
 

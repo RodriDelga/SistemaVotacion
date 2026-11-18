@@ -35,6 +35,7 @@ class Phase(str, Enum):
     SUBMITTING = "submitting"  # voto enviado, esperando respuesta
     RESULT = "result"          # respuesta del backend recibida
     ERROR = "error"            # error antes de poder votar
+    LOCKED = "locked"          # Kiosk bloqueado globalmente por seguridad
 
 
 class SubmitOutcome(str, Enum):
@@ -48,6 +49,7 @@ class Candidate:
     id: str
     name: str
     position_id: str
+    party: Optional[str] = None
     photo_path: Optional[str] = None  # None -> la UI dibuja un avatar de ejemplo
 
 
@@ -68,6 +70,10 @@ class StepResult:
     ok: bool
     message: str = ""
     voter_ref: Optional[str] = None
+    attempts_remaining: Optional[int] = None
+    is_locked: bool = False
+    auth_type: Optional[str] = None
+    error_kind: Optional[str] = None  # mismatch / no_face / multiple_faces / comm_error / locked
 
 
 @dataclass(frozen=True)
