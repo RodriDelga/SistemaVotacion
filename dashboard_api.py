@@ -24,7 +24,10 @@ import re
 import secrets
 import threading
 import time
+<<<<<<< HEAD
 from bisect import bisect_right
+=======
+>>>>>>> origin/feature/dashboard-web
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone, tzinfo
 from pathlib import Path
@@ -35,11 +38,17 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field as PydanticField, NaiveDatetime
+<<<<<<< HEAD
 from sqlalchemy import case, delete, func, text, true
 from sqlmodel import Field, Session, SQLModel, col, select
 
 from forecast import fit_turnout
 
+=======
+from sqlalchemy import case, delete, func, text
+from sqlmodel import Field, Session, SQLModel, col, select
+
+>>>>>>> origin/feature/dashboard-web
 log = logging.getLogger("dashboard")
 
 COOKIE_NAME = "dashboard_session"
@@ -106,6 +115,7 @@ def _local_timezone() -> tzinfo:
         return timezone(timedelta(hours=-6))
 
 
+<<<<<<< HEAD
 def _forecast_window() -> Optional[tuple[datetime, datetime]]:
     opens = os.getenv("DASHBOARD_ELECTION_OPENS_AT", "").strip()
     closes = os.getenv("DASHBOARD_ELECTION_CLOSES_AT", "").strip()
@@ -121,6 +131,8 @@ def _forecast_window() -> Optional[tuple[datetime, datetime]]:
         return None
 
 
+=======
+>>>>>>> origin/feature/dashboard-web
 @dataclass(frozen=True)
 class DashboardConfig:
     admin_key: str
@@ -134,7 +146,10 @@ class DashboardConfig:
     max_failures: int
     lock_seconds: int
     tz: tzinfo
+<<<<<<< HEAD
     forecast_window: Optional[tuple[datetime, datetime]] = None
+=======
+>>>>>>> origin/feature/dashboard-web
 
     @staticmethod
     def from_env() -> "DashboardConfig":
@@ -157,7 +172,10 @@ class DashboardConfig:
             max_failures=int(os.getenv("DASHBOARD_LOGIN_MAX_FAILURES", "5")),
             lock_seconds=int(os.getenv("DASHBOARD_LOGIN_LOCK_SECONDS", "300")),
             tz=_local_timezone(),
+<<<<<<< HEAD
             forecast_window=_forecast_window(),
+=======
+>>>>>>> origin/feature/dashboard-web
         )
 
 
@@ -488,6 +506,7 @@ def install_dashboard(app: FastAPI, bindings: BackendBindings, config: Optional[
             guard += 1
         return {"bucket": step, "registered": registered, "points": points}
 
+<<<<<<< HEAD
     forecast_lock = threading.Lock()
     cached_forecast: Optional[tuple[float, str, dict]] = None
 
@@ -546,6 +565,8 @@ def install_dashboard(app: FastAPI, bindings: BackendBindings, config: Optional[
             cached_forecast = (time.monotonic() + (5 if result["status"] == "incomplete_history" else 60), phase, result)
             return result
 
+=======
+>>>>>>> origin/feature/dashboard-web
     # =============================================================== estado del sistema
     def fresh(reported_at: Optional[datetime]) -> bool:
         return reported_at is not None and (utc_now() - to_aware_utc(reported_at)).total_seconds() <= cfg.heartbeat_ttl
@@ -559,7 +580,11 @@ def install_dashboard(app: FastAPI, bindings: BackendBindings, config: Optional[
             row = beats.get(component)
             if row is None:
                 return "unknown", None
+<<<<<<< HEAD
             if not kiosk_fresh or not fresh(row.reportedAt):
+=======
+            if not kiosk_fresh:  # sin kiosco vivo el dato esta obsoleto
+>>>>>>> origin/feature/dashboard-web
                 return "unknown", to_aware_utc(row.reportedAt)
             return row.status, to_aware_utc(row.reportedAt)
 
