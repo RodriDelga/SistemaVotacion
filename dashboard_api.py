@@ -30,6 +30,7 @@ from bisect import bisect_right
 >>>>>>> origin/feature/dashboard-web
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone, tzinfo
+from math import sqrt
 from pathlib import Path
 from typing import Any, Callable, Literal, Optional
 
@@ -60,6 +61,10 @@ EVENT_LABELS = {
     "cancel": ("Sesión cancelada", "Cancelación rechazada"),
 }
 STATUS_LABELS = {"ok": "Exitoso", "rejected": "Rechazado", "error": "Error"}
+BIOMETRIC_LABELS = {"fingerprint": "huella", "face": "rostro"}
+BURST_WINDOW = timedelta(minutes=10)
+BURST_BASELINE = timedelta(hours=1)
+BURST_CACHE_SECONDS = 60
 CSV_DANGEROUS_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
 
 
@@ -178,6 +183,48 @@ def to_naive_utc(value: datetime) -> datetime:
 
 def to_aware_utc(value: datetime) -> datetime:
     return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+
+
+def _wilson_interval(rejected: int, total: int) -> tuple[float, float]:
+    rate = rejected / total
+    z = 1.96
+    adjustment = z * z / total
+    center = rate + adjustment / 2
+    margin = z * sqrt((rate * (1 - rate) + adjustment / 4) / total)
+    return (center - margin) / (1 + adjustment), (center + margin) / (1 + adjustment)
+
+
+def _biometric_burst_flags(db: Session, now: datetime) -> list[str]:
+    end = to_naive_utc(now)
+    recent_start = end - BURST_WINDOW
+    timestamp = col(DashboardEvent.createdAt)
+    recent_count = func.count(case((timestamp >= recent_start, 1)))
+    # Acotar la lectura por fecha permite usar el índice temporal en SQLite.
+    query = select(DashboardEvent.kind, DashboardEvent.status, func.count(), recent_count).where(
+        timestamp >= recent_start - BURST_BASELINE,
+        timestamp < end,
+        col(DashboardEvent.status).in_(("ok", "rejected")),
+    ).group_by(DashboardEvent.kind, DashboardEvent.status)
+    counts = {(kind, status): (recent, total - recent) for kind, status, total, recent in db.exec(query)}
+
+    flags = []
+    for kind, label in BIOMETRIC_LABELS.items():
+        recent_ok, baseline_ok = counts.get((kind, "ok"), (0, 0))
+        recent_rejected, baseline_rejected = counts.get((kind, "rejected"), (0, 0))
+        recent_total = recent_ok + recent_rejected
+        baseline_total = baseline_ok + baseline_rejected
+        if recent_total < 8 or recent_rejected < 4 or baseline_total < 20:
+            continue
+        recent_rate = recent_rejected / recent_total
+        baseline_rate = baseline_rejected / baseline_total
+        recent_low, _ = _wilson_interval(recent_rejected, recent_total)
+        _, baseline_high = _wilson_interval(baseline_rejected, baseline_total)
+        if recent_rate - baseline_rate >= 0.15 and recent_low > baseline_high:
+            flags.append(
+                f"Ráfaga de rechazos de {label}. Hubo {recent_rejected} de {recent_total} en 10 minutos "
+                f"({recent_rate:.0%}). La tasa de la hora anterior fue del {baseline_rate:.0%}."
+            )
+    return flags
 
 
 def parse_range_bound(raw: Optional[str], tz: tzinfo, end_of_day: bool) -> Optional[datetime]:
@@ -641,9 +688,14 @@ def install_dashboard(app: FastAPI, bindings: BackendBindings, config: Optional[
         return {"asOf": utc_now().isoformat(), "events": [event_payload(row) for row in rows]}
 
     # ================================================================== analiticas
+    burst_lock = threading.Lock()
+    burst_cache: tuple[float, list[str]] = (0.0, [])
+
     @protected.get("/analytics")
     def analytics(date_from: Optional[str] = Query(default=None, alias="from"),
                   date_to: Optional[str] = Query(default=None, alias="to"), db: Session = Depends(get_db)):
+        nonlocal burst_cache
+        now = utc_now()
         start = parse_range_bound(date_from, cfg.tz, False)
         end = parse_range_bound(date_to, cfg.tz, True)
         query = select(DashboardEvent.kind, DashboardEvent.status, func.count(DashboardEvent.id)).group_by(
@@ -672,7 +724,16 @@ def install_dashboard(app: FastAPI, bindings: BackendBindings, config: Optional[
             if failed >= 10 and rate > 0.10:
                 level = "PRECAUCIÓN" if level != "ALERTA" else level
                 flags.append(f"Más de 10 rechazos y tasa superior al 10% en {name}.")
-        return {"asOf": utc_now().isoformat(), "status": level, "auditFlags": flags, "byKind": summary}
+        cutoff = to_naive_utc(now)
+        if (start is None or start <= cutoff - BURST_WINDOW) and (end is None or cutoff < end):
+            with burst_lock:
+                if time.monotonic() >= burst_cache[0]:
+                    active_bursts = _biometric_burst_flags(db, now)
+                    burst_cache = (time.monotonic() + BURST_CACHE_SECONDS, active_bursts)
+                flags.extend(burst_cache[1])
+                if burst_cache[1] and level == "NORMAL":
+                    level = "PRECAUCIÓN"
+        return {"asOf": now.isoformat(), "status": level, "auditFlags": flags, "byKind": summary}
 
     # =================================================================== exportacion
     def csv_response(name: str, header: list[str], rows: list[list[Any]]) -> Response:

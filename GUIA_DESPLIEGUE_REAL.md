@@ -207,6 +207,12 @@ Reinicie FastAPI con esas variables y compile el dashboard con `npm run build`. 
 
 El modelo requiere al menos 100 votos con marca de tiempo y 60 minutos desde la apertura. La cifra se publica cuando el ajuste tiene suficiente confianza. Si el total de votantes que ya votaron difiere del total de votos exitosos de la bitácora, el panel informa que la serie no se puede confirmar. Al cierre muestra la participación observada si la serie está completa. El backend reutiliza el resultado hasta 60 segundos entre consultas.
 
+### Ráfagas de rechazos biométricos
+
+El panel de auditoría compara por separado las tasas de rechazo de huella y rostro de los últimos 10 minutos con las de la hora anterior a esos 10 minutos. Pide al menos 8 intentos y 4 rechazos en la ventana reciente, además de 20 intentos en la hora de referencia. Informa una ráfaga si la tasa sube al menos 15 puntos porcentuales y los intervalos de Wilson al 95 % quedan separados. La alerta sirve para revisión del operador.
+
+FastAPI calcula la señal al consultar la auditoría en vivo y reutiliza el resultado durante 60 segundos por proceso. Los reportes de rangos históricos muestran las reglas de auditoría de ese rango.
+
 ## 7. Cargar datos de prueba en Neon (staging)
 
 Use solo datos **ficticios**. Con el backend en marcha:

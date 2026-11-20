@@ -194,8 +194,7 @@ class DashboardApiTest(unittest.TestCase):
         self.assertEqual(analytics["status"], "ALERTA")
         self.assertEqual(self.client.get("/api/v1/admin/timeline", params={"from": "no-es-fecha"}).status_code, 422)
 
-    # ------------------------------------------------------- pronóstico
-    def forecast_client(self, window):
+    def dashboard_client(self, window=None):
         app = FastAPI()
         config = replace(dash.DashboardConfig.from_env(), forecast_window=window)
         dash.install_dashboard(app, dash.BackendBindings(
@@ -210,6 +209,62 @@ class DashboardApiTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         return client
 
+    # ------------------------------------------------------- ráfagas de rechazos
+    def add_biometric_counts(self, db, timestamp, kind, *, ok, rejected, error=0):
+        for status, count in (("ok", ok), ("rejected", rejected), ("error", error)):
+            db.add_all(dash.DashboardEvent(
+                createdAt=dash.to_naive_utc(timestamp), kind=kind, device="Urna 01", status=status,
+            ) for _ in range(count))
+
+    def test_biometric_burst_uses_recent_rate_and_caches_it_for_live_reports(self):
+        client = self.dashboard_client()
+        now = OPEN + timedelta(hours=6)
+        with Session(backend.engine) as db:
+            self.add_biometric_counts(db, now - timedelta(minutes=30), "fingerprint", ok=79, rejected=1)
+            self.add_biometric_counts(db, now - timedelta(minutes=9), "fingerprint", ok=18, rejected=6)
+            self.add_biometric_counts(db, now - timedelta(minutes=1), "fingerprint", ok=0, rejected=0, error=2)
+            db.commit()
+
+        url = "/api/v1/admin/analytics"
+        with (
+            patch.object(dash, "utc_now", return_value=now) as clock,
+            patch.object(dash, "time", wraps=dash.time) as cache_clock,
+            patch.object(dash, "_biometric_burst_flags", wraps=dash._biometric_burst_flags) as calculate,
+        ):
+            cache_clock.monotonic.return_value = 100
+            data = client.get(url).json()
+            self.assertEqual(data["status"], "PRECAUCIÓN")
+            self.assertEqual(len(data["auditFlags"]), 1)
+            self.assertIn("6 de 24 en 10 minutos (25%)", data["auditFlags"][0])
+
+            archived = client.get(url, params={"to": (now - timedelta(hours=1)).isoformat()}).json()
+            self.assertEqual(archived["auditFlags"], [])
+            cache_clock.monotonic.return_value = 159
+            self.assertEqual(client.get(url).json()["auditFlags"], data["auditFlags"])
+            calculate.assert_called_once()
+
+            cache_clock.monotonic.return_value = 160
+            clock.return_value = now + timedelta(minutes=1, seconds=1)
+            self.assertEqual(client.get(url).json()["auditFlags"], [])
+            self.assertEqual(calculate.call_count, 2)
+
+    def test_biometric_burst_requires_history_and_a_change_in_rate(self):
+        client = self.dashboard_client()
+        now = OPEN + timedelta(hours=6)
+        with Session(backend.engine) as db:
+            self.add_biometric_counts(db, now - timedelta(minutes=30), "fingerprint", ok=5, rejected=0)
+            self.add_biometric_counts(db, now - timedelta(minutes=2), "fingerprint", ok=2, rejected=8)
+            self.add_biometric_counts(db, now - timedelta(minutes=30), "face", ok=30, rejected=10)
+            self.add_biometric_counts(db, now - timedelta(minutes=2), "face", ok=18, rejected=6)
+            db.commit()
+
+        with patch.object(dash, "utc_now", return_value=now):
+            data = client.get("/api/v1/admin/analytics").json()
+        self.assertEqual(data["status"], "ALERTA")
+        self.assertTrue(any(">30%" in flag for flag in data["auditFlags"]))
+        self.assertFalse(any(flag.startswith("Ráfaga") for flag in data["auditFlags"]))
+
+    # ------------------------------------------------------- pronóstico
     def test_forecast_schedule_requires_an_offset_and_order(self):
         env = {"DASHBOARD_ELECTION_OPENS_AT": "2026-11-08T08:00:00-06:00",
                "DASHBOARD_ELECTION_CLOSES_AT": "2026-11-08T18:00:00-06:00"}
@@ -224,8 +279,8 @@ class DashboardApiTest(unittest.TestCase):
 
     def test_forecast_hides_incomplete_history(self):
         self.seed()
-        self.assertEqual(self.forecast_client(None).get("/api/v1/admin/forecast").json()["status"], "not_configured")
-        client = self.forecast_client((OPEN, CLOSE))
+        self.assertEqual(self.dashboard_client().get("/api/v1/admin/forecast").json()["status"], "not_configured")
+        client = self.dashboard_client((OPEN, CLOSE))
         with patch.object(dash, "utc_now", return_value=OPEN + timedelta(hours=2)):
             data = client.get("/api/v1/admin/forecast").json()
         self.assertEqual(data["status"], "incomplete_history")
@@ -248,11 +303,11 @@ class DashboardApiTest(unittest.TestCase):
                        + [(now, "rejected")])
             db.commit()
 
-        client = self.forecast_client((OPEN, CLOSE))
+        client = self.dashboard_client((OPEN, CLOSE))
         with patch.object(dash, "utc_now", return_value=OPEN - timedelta(minutes=1)):
             self.assertEqual(client.get("/api/v1/admin/forecast").json()["status"], "not_open")
         with patch.object(dash, "utc_now", return_value=OPEN + timedelta(minutes=10)):
-            early_client = self.forecast_client((OPEN, CLOSE))
+            early_client = self.dashboard_client((OPEN, CLOSE))
             self.assertEqual(early_client.get("/api/v1/admin/forecast").json()["status"], "insufficient_data")
         with patch.object(dash, "utc_now", return_value=now), patch.object(dash, "fit_turnout", wraps=dash.fit_turnout) as fit:
             data = client.get("/api/v1/admin/forecast").json()

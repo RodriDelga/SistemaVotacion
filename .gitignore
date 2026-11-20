@@ -4,3 +4,9 @@ __pycache__/
 *.db
 dashboard/node_modules/
 dashboard/dist/
+.pytest_cache/
+secrets.h
+.vote-sequences/
+.test-deps/
+data/security_photos/
+SistemaVotacion-kiosk-seguridad.zip
